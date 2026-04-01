@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CardSense Distributed Monitor</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>CardSense Distributed Monitor</h1>
+
+      <section class="card">
+        <h2>Register Camera</h2>
+        <form id="register-form">
+          <input id="camera-id" placeholder="camera id" value="cam-1" required />
+          <input id="camera-source" placeholder="source (rtsp/url/device)" value="0" />
+          <button type="submit">Register</button>
+        </form>
+        <p id="register-status"></p>
+      </section>
+
+      <section class="card">
+        <h2>Live Detections</h2>
+        <div id="events"></div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
