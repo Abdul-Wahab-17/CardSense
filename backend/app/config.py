@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     backend_consumer_name: str = "backend-1"
     max_queue_len: int = 5000
     static_dir: str = "frontend"
+    hand_size: int = 13
+    min_card_conf: float = 0.35
+    hand_memory_events: int = 120
+    card_labels: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

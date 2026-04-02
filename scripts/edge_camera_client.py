@@ -14,13 +14,23 @@ def register(base_url: str, camera_id: str, source: str) -> None:
     ).raise_for_status()
 
 
-def send_frames(base_url: str, camera_id: str, source: str, fps: float) -> None:
+def flush_batch(base_url: str, batch: list[dict]) -> None:
+    if not batch:
+        return
+    if len(batch) == 1:
+        requests.post(f"{base_url}/api/frames", json=batch[0], timeout=10).raise_for_status()
+        return
+    requests.post(f"{base_url}/api/frames/batch", json={"frames": batch}, timeout=10).raise_for_status()
+
+
+def send_frames(base_url: str, camera_id: str, source: str, fps: float, batch_size: int) -> None:
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open source: {source}")
 
     frame_interval = 1.0 / max(fps, 1)
     last_send = 0.0
+    batch: list[dict] = []
 
     while True:
         ok, frame = cap.read()
@@ -42,11 +52,14 @@ def send_frames(base_url: str, camera_id: str, source: str, fps: float) -> None:
             "frame_b64": frame_b64,
             "ts_ms": int(now * 1000),
         }
+        batch.append(payload)
 
-        try:
-            requests.post(f"{base_url}/api/frames", json=payload, timeout=10).raise_for_status()
-        except Exception as exc:
-            print(f"Failed sending frame: {exc}")
+        if len(batch) >= max(batch_size, 1):
+            try:
+                flush_batch(base_url, batch)
+                batch.clear()
+            except Exception as exc:
+                print(f"Failed sending frame batch: {exc}")
 
 
 def main() -> None:
@@ -55,12 +68,13 @@ def main() -> None:
     parser.add_argument("--camera-id", default="cam-1")
     parser.add_argument("--source", default="0", help="OpenCV source index or RTSP/file URL")
     parser.add_argument("--fps", type=float, default=10.0)
+    parser.add_argument("--batch-size", type=int, default=4)
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
     register(args.base_url, args.camera_id, str(source))
     print(f"Registered {args.camera_id}. Streaming frames...")
-    send_frames(args.base_url, args.camera_id, source, args.fps)
+    send_frames(args.base_url, args.camera_id, source, args.fps, args.batch_size)
 
 
 if __name__ == "__main__":

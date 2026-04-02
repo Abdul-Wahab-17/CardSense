@@ -23,10 +23,34 @@ h1, h2 {
   margin-top: 0;
 }
 
+.muted {
+  color: #9ca3af;
+  margin-top: -4px;
+}
+
 form {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.stream-controls {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.stream-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #cbd5e1;
+}
+
+.stream-controls input {
+  width: 64px;
 }
 
 input, button {
@@ -53,4 +77,60 @@ button {
 .meta {
   color: #9ca3af;
   font-size: 0.9rem;
+}
+
+.hand-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.hand-slot {
+  border: 1px solid #374151;
+  border-radius: 10px;
+  padding: 10px;
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.hand-slot.empty {
+  opacity: 0.5;
+}
+
+.hand-slot.filled {
+  background: #0f172a;
+  border-color: #2563eb;
+}
+
+.hand-slot .label {
+  font-weight: 600;
+}
+
+.hand-slot .conf {
+  color: #9ca3af;
+  font-size: 0.85rem;
+  margin-top: 4px;
+}
+
+.tips {
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.tips li {
+  margin: 6px 0;
+  color: #d1d5db;
+}
+
+#local-preview {
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 10px;
+  border: 1px solid #374151;
+  background: #020617;
+  max-height: 280px;
+  object-fit: contain;
 }

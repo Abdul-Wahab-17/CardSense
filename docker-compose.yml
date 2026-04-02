@@ -19,6 +19,8 @@ services:
       BACKEND_CONSUMER_GROUP: backend_broadcaster
       BACKEND_CONSUMER_NAME: backend-1
       STATIC_DIR: frontend
+      HAND_SIZE: 13
+      MIN_CARD_CONF: 0.35
     depends_on:
       - redis
     ports:
@@ -35,9 +37,16 @@ services:
       FRAME_STREAM: frames
       DETECTION_STREAM: detections
       FRAME_CONSUMER_GROUP: yolo_workers
-      WORKER_NAME: worker-${HOSTNAME}
-      YOLO_MODEL: yolov8n.pt
-      CONF_THRES: 0.25
+      WORKER_NAME: worker-${HOSTNAME:-local}
+      WORKER_PROCESSES: 1
+      YOLO_MODEL: /app/models/playing_cards_best.pt
+      YOLO_MODEL_URL: https://raw.githubusercontent.com/noorkhokhar99/Playing-Cards-Detection-with-YoloV8/main/yolov8s_playing_cards.pt
+      MODEL_CACHE_DIR: /tmp/cardsense-models
+      CONF_THRES: 0.02
+      DEBUG_CONF: 0.001
+      MAX_FRAME_AGE_MS: 2500
       MAX_QUEUE_LEN: 5000
+    volumes:
+      - ./models:/app/models
     depends_on:
       - redis

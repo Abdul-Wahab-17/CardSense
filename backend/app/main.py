@@ -9,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .models import CameraRegister, DetectionEvent, FrameIn
+from .models import CameraRegister, DetectionEvent, FrameBatchIn, FrameIn, HandAdvice, HandCard, HandState
 from .redis_client import redis_client
+from .thulla import build_thulla_advice
 
 
 class DetectionHub:
@@ -52,7 +53,58 @@ class DetectionHub:
                 self._clients.discard(ws)
 
 
+class HandStateStore:
+    def __init__(self) -> None:
+        self._memory = defaultdict(lambda: deque(maxlen=settings.hand_memory_events))
+        self._latest_ts = defaultdict(int)
+        labels = [label.strip() for label in settings.card_labels.split(",") if label.strip()]
+        self._card_labels = set(labels)
+
+    def update(self, event: DetectionEvent) -> HandState:
+        camera_id = event.camera_id
+        self._latest_ts[camera_id] = max(self._latest_ts[camera_id], event.ts_ms)
+
+        for detection in event.detections:
+            if detection.conf < settings.min_card_conf:
+                continue
+            if self._card_labels and detection.cls_name not in self._card_labels:
+                continue
+            self._memory[camera_id].append((detection.cls_name, float(detection.conf)))
+
+        scored_cards: dict[str, float] = {}
+        for label, conf in self._memory[camera_id]:
+            scored_cards[label] = max(conf, scored_cards.get(label, 0.0))
+
+        top_cards = sorted(scored_cards.items(), key=lambda item: item[1], reverse=True)[: settings.hand_size]
+        cards = [HandCard(label=label, confidence=round(conf, 3)) for label, conf in top_cards]
+
+        return HandState(
+            camera_id=camera_id,
+            updated_ts_ms=self._latest_ts[camera_id],
+            max_cards=settings.hand_size,
+            cards=cards,
+        )
+
+    def latest(self, camera_id: str) -> HandState:
+        scored_cards: dict[str, float] = {}
+        for label, conf in self._memory[camera_id]:
+            scored_cards[label] = max(conf, scored_cards.get(label, 0.0))
+
+        top_cards = sorted(scored_cards.items(), key=lambda item: item[1], reverse=True)[: settings.hand_size]
+        cards = [HandCard(label=label, confidence=round(conf, 3)) for label, conf in top_cards]
+        return HandState(
+            camera_id=camera_id,
+            updated_ts_ms=self._latest_ts[camera_id],
+            max_cards=settings.hand_size,
+            cards=cards,
+        )
+
+    def latest_all(self) -> list[HandState]:
+        return [self.latest(camera_id) for camera_id in self._memory.keys()]
+
+
 hub = DetectionHub()
+hand_state_store = HandStateStore()
 consume_task: asyncio.Task | None = None
 
 
@@ -84,7 +136,11 @@ async def consume_detections() -> None:
                 try:
                     raw = payload.get("event", "{}")
                     event = json.loads(raw)
-                    DetectionEvent.model_validate(event)
+                    parsed = DetectionEvent.model_validate(event)
+                    hand_state = hand_state_store.update(parsed)
+                    advice = build_thulla_advice(hand_state)
+                    event["hand_state"] = hand_state.model_dump()
+                    event["advice"] = advice.model_dump()
                     await hub.remember(event)
                     await hub.broadcast(event)
                 finally:
@@ -155,9 +211,53 @@ async def ingest_frame(body: FrameIn) -> dict:
     return {"ok": True, "queued": msg_id}
 
 
+@app.post("/api/frames/batch")
+async def ingest_frame_batch(body: FrameBatchIn) -> dict:
+    queued = []
+    for frame in body.frames:
+        camera_key = f"camera:{frame.camera_id}"
+        if not await redis_client.exists(camera_key):
+            raise HTTPException(status_code=404, detail=f"Camera not registered: {frame.camera_id}")
+
+    pipeline = redis_client.pipeline(transaction=False)
+    for frame in body.frames:
+        payload = {
+            "camera_id": frame.camera_id,
+            "ts_ms": str(frame.ts_ms),
+            "frame_b64": frame.frame_b64,
+        }
+        pipeline.xadd(
+            settings.frame_stream,
+            payload,
+            maxlen=settings.max_queue_len,
+            approximate=True,
+        )
+
+    queued = await pipeline.execute()
+
+    return {"ok": True, "queued_count": len(queued), "queued": queued}
+
+
 @app.get("/api/detections/latest")
 async def latest_detections() -> dict:
     return {"events": await hub.latest()}
+
+
+@app.get("/api/hands/latest")
+async def latest_hands() -> dict:
+    return {"hands": [hand.model_dump() for hand in hand_state_store.latest_all()]}
+
+
+@app.get("/api/hands/{camera_id}")
+async def latest_hand(camera_id: str) -> dict:
+    return {"hand": hand_state_store.latest(camera_id).model_dump()}
+
+
+@app.get("/api/hands/{camera_id}/advice")
+async def hand_advice(camera_id: str) -> dict:
+    hand = hand_state_store.latest(camera_id)
+    advice: HandAdvice = build_thulla_advice(hand)
+    return {"advice": advice.model_dump(), "hand": hand.model_dump()}
 
 
 @app.websocket("/ws/detections")
