@@ -34,12 +34,15 @@ public class HomePage {
             }
 
             if (HighGui.waitKey(30) == 27) { // Press ESC to exit
+                
                 break;
             }
+            return "Got the frame";
         }
 
         camera.release();
         HighGui.destroyAllWindows();
+        return "Got the frame";
     }
     
 }
