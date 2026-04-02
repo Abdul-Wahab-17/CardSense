@@ -20,7 +20,9 @@ services:
       BACKEND_CONSUMER_NAME: backend-1
       STATIC_DIR: frontend
       HAND_SIZE: 13
-      MIN_CARD_CONF: 0.35
+      MIN_CARD_CONF: 0.02
+      HAND_MEMORY_EVENTS: 400
+      MIN_CARD_VOTES: 1
     depends_on:
       - redis
     ports:
@@ -44,7 +46,8 @@ services:
       MODEL_CACHE_DIR: /tmp/cardsense-models
       CONF_THRES: 0.02
       DEBUG_CONF: 0.001
-      MAX_FRAME_AGE_MS: 2500
+      MAX_FRAME_AGE_MS: 1500
+      SLOW_ACCURATE_MODE: 1
       MAX_QUEUE_LEN: 5000
     volumes:
       - ./models:/app/models

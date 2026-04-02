@@ -61,3 +61,7 @@ class HandAdvice(BaseModel):
     summary: str
     discard_candidates: List[str]
     tips: List[HelpTip]
+
+
+class HandOverrideIn(BaseModel):
+    cards: List[str] = Field(..., min_length=0, max_length=13)

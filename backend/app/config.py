@@ -11,8 +11,9 @@ class Settings(BaseSettings):
     max_queue_len: int = 5000
     static_dir: str = "frontend"
     hand_size: int = 13
-    min_card_conf: float = 0.35
+    min_card_conf: float = 0.02
     hand_memory_events: int = 120
+    min_card_votes: int = 1
     card_labels: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

@@ -18,6 +18,7 @@ This repository now includes a working distributed backend/frontend stack for re
 - Parallel worker service running lightweight YOLO card model (`yolov8n-playing-cards`) with multi-process execution per machine
 - React frontend dashboard with Thulla hand slots (13 cards) + live detections (served by backend)
 - Thulla helper suggestions (discard candidates, suit strength, sequence/pair hints)
+- Manual hand override mode to test Thulla helper when model quality is poor
 - Edge camera client script to push webcam/RTSP frames
 
 ## Folder structure
@@ -159,6 +160,12 @@ Live Debug panel now shows:
 - frame age (`age_ms`) to confirm near-real-time processing
 - per-pass rotation/scale candidate counts
 - low-threshold probe top classes
+
+If detection quality is inconsistent, use **Test Mode (Manual Hand)** in the UI to validate Thulla game logic independently of model quality.
+
+Worker can run in slower but more accurate mode:
+
+- `SLOW_ACCURATE_MODE=1` (default)
 
 Rebuild both worker and backend to enable it:
 

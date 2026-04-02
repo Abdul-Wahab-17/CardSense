@@ -7,12 +7,13 @@ function App() {
   const [cameraSource, setCameraSource] = useState('0');
   const [registerStatus, setRegisterStatus] = useState('');
   const [streamStatus, setStreamStatus] = useState('Register camera then start webcam stream.');
-  const [fps, setFps] = useState(10);
-  const [batchSize, setBatchSize] = useState(4);
+  const [fps, setFps] = useState(2);
+  const [batchSize, setBatchSize] = useState(1);
   const [events, setEvents] = useState([]);
   const [hand, setHand] = useState(null);
   const [advice, setAdvice] = useState(null);
   const [debugInfo, setDebugInfo] = useState(null);
+  const [manualCards, setManualCards] = useState('AS,10H,10D,10S,9C,9D,9H,8S,7S,6S,5S,4S,3S');
   const [isStreaming, setIsStreaming] = useState(false);
 
   const videoRef = useRef(null);
@@ -163,8 +164,8 @@ function App() {
       videoEl.srcObject = stream;
       await videoEl.play();
 
-      const intervalMs = Math.round(1000 / Math.max(1, Math.min(30, Number(fps) || 10)));
-      const batchLimit = Math.max(1, Math.min(16, Number(batchSize) || 4));
+      const intervalMs = Math.round(1000 / Math.max(1, Math.min(4, Number(fps) || 2)));
+      const batchLimit = Math.max(1, Math.min(2, Number(batchSize) || 1));
       setIsStreaming(true);
       setStreamStatus(`Streaming ${Math.round(1000 / intervalMs)} FPS, batch=${batchLimit}`);
 
@@ -217,6 +218,38 @@ function App() {
     setStreamStatus('Stream stopped.');
   }
 
+  async function applyManualHandOverride() {
+    const cards = manualCards
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, THULLA_HAND_SIZE);
+
+    try {
+      const res = await fetch(`/api/hands/${cameraId.trim()}/override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cards }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setRegisterStatus('Manual hand override applied.');
+      await loadInitialData();
+    } catch (err) {
+      setRegisterStatus(`Manual override failed: ${err}`);
+    }
+  }
+
+  async function clearManualHandOverride() {
+    try {
+      const res = await fetch(`/api/hands/${cameraId.trim()}/override`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(await res.text());
+      setRegisterStatus('Manual hand override cleared.');
+      await loadInitialData();
+    } catch (err) {
+      setRegisterStatus(`Clear override failed: ${err}`);
+    }
+  }
+
   return (
     <main>
       <h1>CardSense Thulla Hand Monitor (React)</h1>
@@ -242,11 +275,11 @@ function App() {
         <div className="stream-controls">
           <label>
             FPS
-            <input type="number" min="1" max="30" value={fps} onChange={(e) => setFps(Number(e.target.value))} />
+            <input type="number" min="1" max="4" value={fps} onChange={(e) => setFps(Number(e.target.value))} />
           </label>
           <label>
             Batch
-            <input type="number" min="1" max="16" value={batchSize} onChange={(e) => setBatchSize(Number(e.target.value))} />
+            <input type="number" min="1" max="2" value={batchSize} onChange={(e) => setBatchSize(Number(e.target.value))} />
           </label>
           <button type="button" onClick={startWebcamStream} disabled={isStreaming}>Start webcam stream</button>
           <button type="button" onClick={stopWebcamStream} disabled={!isStreaming}>Stop</button>
@@ -282,6 +315,21 @@ function App() {
             <li key={i}><strong>{tip.title}:</strong> {tip.detail}</li>
           ))}
         </ul>
+      </section>
+
+      <section className="card">
+        <h2>Test Mode (Manual Hand)</h2>
+        <p className="muted">Use this to test Thulla advice even if model detections are weak.</p>
+        <input
+          value={manualCards}
+          onChange={(e) => setManualCards(e.target.value)}
+          placeholder="AS,10H,10D,..."
+          style={{ width: '100%' }}
+        />
+        <div className="stream-controls">
+          <button type="button" onClick={applyManualHandOverride}>Apply Manual Hand</button>
+          <button type="button" onClick={clearManualHandOverride}>Clear Manual Hand</button>
+        </div>
       </section>
 
       <section className="card">

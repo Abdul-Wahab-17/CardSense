@@ -27,6 +27,19 @@ CONF_THRES = float(os.getenv("CONF_THRES", "0.25"))
 WORKER_PROCESSES = int(os.getenv("WORKER_PROCESSES", "1"))
 DEBUG_CONF = float(os.getenv("DEBUG_CONF", "0.01"))
 MAX_FRAME_AGE_MS = int(os.getenv("MAX_FRAME_AGE_MS", "2500"))
+SLOW_ACCURATE_MODE = os.getenv("SLOW_ACCURATE_MODE", "1") == "1"
+
+
+def infer(model: YOLO, image, conf: float):
+    return model.predict(
+        source=image,
+        conf=conf,
+        imgsz=1280 if SLOW_ACCURATE_MODE else 960,
+        augment=SLOW_ACCURATE_MODE,
+        agnostic_nms=SLOW_ACCURATE_MODE,
+        max_det=100,
+        verbose=False,
+    )[0]
 
 
 def ensure_group(r: redis.Redis, stream: str, group: str) -> None:
@@ -128,7 +141,7 @@ def predict_with_fallback(model: YOLO, image, conf: float):
     ]
 
     for pass_idx, (angle, candidate) in enumerate(passes):
-        result = model.predict(source=candidate, conf=conf, imgsz=960, verbose=False)[0]
+        result = infer(model, candidate, conf)
         if candidate.shape[:2] != (height, width):
             ch, cw = candidate.shape[:2]
             scale_x = cw / width
@@ -167,7 +180,7 @@ def predict_with_fallback(model: YOLO, image, conf: float):
             detections.sort(key=lambda det: det["conf"], reverse=True)
             return detections, {"selected_pass": pass_idx, "passes": pass_stats}
 
-    probe_result = model.predict(source=image, conf=DEBUG_CONF, imgsz=960, verbose=False)[0]
+    probe_result = infer(model, image, DEBUG_CONF)
     probe_detections = extract_detections(probe_result, 0, width, height)
     probe_detections.sort(key=lambda det: det["conf"], reverse=True)
 
