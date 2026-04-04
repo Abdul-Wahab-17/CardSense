@@ -1,0 +1,76 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: cardsense-redis
+    ports:
+      - "6379:6379"
+
+  db:
+    image: postgres:16-alpine
+    container_name: cardsense-db
+    environment:
+      POSTGRES_DB: cardsense
+      POSTGRES_USER: cardsense
+      POSTGRES_PASSWORD: cardsense
+    ports:
+      - "5432:5432"
+    volumes:
+      - cardsense-db:/var/lib/postgresql/data
+
+  api-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cardsense-api
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: api
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://cardsense:cardsense@db:5432/cardsense
+    depends_on:
+      - redis
+      - db
+    ports:
+      - "8000:8000"
+
+  reducer-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cardsense-reducer
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: reducer
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://cardsense:cardsense@db:5432/cardsense
+    depends_on:
+      - redis
+      - db
+
+  worker-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: cardsense-worker
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://cardsense:cardsense@db:5432/cardsense
+      WORKER_ENABLED: 1
+    depends_on:
+      - redis
+      - db
+
+  frontend-service:
+    image: nginx:1.27-alpine
+    container_name: cardsense-frontend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+
+volumes:
+  cardsense-db:

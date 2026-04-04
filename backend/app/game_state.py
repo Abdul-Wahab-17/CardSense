@@ -5,6 +5,7 @@ from typing import Dict, List
 import time
 
 from .models import CanonicalGameState, GameRules, PlayedHistoryItem, TableTrickCard, TurnState, UncertaintyBlock
+from .config import settings
 
 
 @dataclass
@@ -196,7 +197,7 @@ class GameStateEngine:
         transition_score, transition_notes, reason_code, reason_detail = self._transition_score(state, hand_cards, table_cards_raw)
 
         # keep previous state if very weak transition support
-        if transition_score < 0.45:
+        if transition_score < 0.45 and bool(settings.feature_strict_transition_reject):
             self._metrics["transitions_rejected"] += 1
             self._metrics["illegal_transition_rejects"] += 1
             reject_codes = self._metrics.setdefault("transition_reject_reason_code", {})

@@ -6,6 +6,7 @@ from typing import Dict, List
 import math
 
 from .models import CanonicalGameState
+from .config import settings
 
 RANKS = ["A", "K", "Q", "J", "10", "9", "8", "7", "6", "5", "4", "3", "2"]
 SUITS = ["S", "H", "D", "C"]
@@ -33,6 +34,9 @@ def build_belief(state: CanonicalGameState) -> Dict[str, Dict[str, float]]:
     for card in unseen:
         for seat in SEATS:
             belief[seat][card] = p
+
+    if not bool(settings.feature_belief_bayes_update):
+        return belief
 
     # seat-specific evidence from played history ledger
     by_trick: Dict[int, List] = defaultdict(list)

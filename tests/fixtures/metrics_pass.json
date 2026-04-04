@@ -1,0 +1,9 @@
+{
+  "recommendation_latency_ms": {
+    "p95": 120,
+    "p99": 300
+  },
+  "transitions": {
+    "illegal_transition_reject_rate": 0.02
+  }
+}

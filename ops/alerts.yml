@@ -1,0 +1,50 @@
+groups:
+  - name: cardsense
+    rules:
+      - alert: RecommendationLatencyP95High
+        expr: cardsense_recommendation_latency_ms_bucket{le="300"} < 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Recommendation latency p95 > 300ms
+
+      - alert: TransitionRejectRateHigh
+        expr: sum(cardsense_transition_reject_total) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Transition reject rate elevated
+
+      - alert: WorkerErrorsHigh
+        expr: cardsense_worker_skipped_out_of_order_total > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker out-of-order skips elevated
+
+      - alert: QueueDepthGrowing
+        expr: cardsense_queue_depth_frames > 5000
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Frame queue depth growing
+
+      - alert: WebsocketClientDrop
+        expr: cardsense_ws_connected_clients < 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: WebSocket clients dropped
+
+      - alert: DBWriteLatencyHigh
+        expr: max(cardsense_db_write_latency_ms) > 250
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: DB write latency high

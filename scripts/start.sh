@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 WORKERS="${WORKERS:-2}"
+ENABLE_SPLIT_REDUCER="${ENABLE_SPLIT_REDUCER:-0}"
 START_EDGE_CLIENT="${START_EDGE_CLIENT:-0}"
 CAMERA_ID="${CAMERA_ID:-cam-1}"
 CAMERA_SOURCE="${CAMERA_SOURCE:-0}"
@@ -26,7 +27,25 @@ if [ ! -s "$MODEL_PATH" ]; then
 fi
 
 echo "Starting services with $WORKERS worker container(s)..."
-docker compose up --build -d --scale "worker=$WORKERS"
+SERVICES="$(docker compose config --services)"
+
+if echo "$SERVICES" | grep -qx "worker-service"; then
+  WORKER_SERVICE="worker-service"
+  CORE_SERVICES=(redis db api-service worker-service frontend-service)
+  if [ "$ENABLE_SPLIT_REDUCER" = "1" ]; then
+    CORE_SERVICES+=(reducer-service)
+  fi
+elif echo "$SERVICES" | grep -qx "worker"; then
+  WORKER_SERVICE="worker"
+  CORE_SERVICES=(redis backend worker)
+else
+  echo "Could not find worker service in docker compose config."
+  echo "Available services:"
+  echo "$SERVICES"
+  exit 1
+fi
+
+docker compose up --build -d "${CORE_SERVICES[@]}" --scale "${WORKER_SERVICE}=$WORKERS"
 
 echo "Waiting for backend health at $BACKEND_URL/api/health ..."
 for _ in $(seq 1 60); do

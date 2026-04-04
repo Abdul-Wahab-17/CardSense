@@ -8,3 +8,5 @@ opencv-python-headless==4.11.0.86
 requests==2.32.3
 numpy==2.1.1
 omegaconf==2.3.0
+PyJWT==2.8.0
+psycopg[binary]==3.2.1

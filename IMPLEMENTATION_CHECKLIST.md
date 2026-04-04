@@ -580,3 +580,233 @@ The app is near-complete when all are true:
 - explicitly marked deprecated/removed in a changelog section.
 3. Do not merge phases without tests for that phase.
 4. Track all threshold changes in one location with comments and rationale.
+
+---
+
+## 13) Production-grade plan (same codebase)
+
+This section is the execution plan to make CardSense production-grade on top of the near-100% feature plan above.
+
+### 13.1 Production architecture target
+
+Deploy as 6 logical services:
+1. `api-service` (FastAPI web/API + websocket)
+2. `reducer-service` (single-writer state reduction loop)
+3. `worker-service` (N scalable YOLO inference workers)
+4. `redis-service` (stream queue + ephemeral coordination)
+5. `db-service` (PostgreSQL, replacing SQLite for prod writes)
+6. `frontend-service` (static UI + reverse proxy)
+
+Keep module names but split process roles with env flags:
+- `APP_ROLE=api|reducer|all`
+- `WORKER_ENABLED=1|0`
+
+### 13.2 Hard production requirements
+
+1. No single point of failure for API layer.
+2. Exactly-once-like state application per `(game_id, frame_id)` in reducer path.
+3. Durable storage for events/transitions/recommendations.
+4. Full authentication and authorization.
+5. Full observability (logs + metrics + traces) and alerting.
+6. Safe deploy/rollback strategy with zero-downtime targets.
+
+### 13.3 Data durability and consistency plan
+
+Move primary persistence from SQLite to Postgres.
+
+Variables to add:
+- `DATABASE_URL`
+- `DB_POOL_MIN_SIZE`
+- `DB_POOL_MAX_SIZE`
+- `DB_STATEMENT_TIMEOUT_MS`
+- `DB_CONNECT_TIMEOUT_MS`
+
+Tables (required):
+1. `events_raw`
+2. `state_transitions`
+3. `recommendations`
+4. `game_configs`
+5. `reducer_offsets`
+6. `deploy_audit_log`
+
+Idempotency keys:
+- `idempotency_event_key = "{game_id}:{frame_id}"`
+- `idempotency_transition_key = "{game_id}:{last_transition_id}"`
+- `idempotency_recommendation_key = "{game_id}:{freshness_ts_ms}:{best_action.card}"`
+
+### 13.4 Reducer correctness plan
+
+Reducer must run as dedicated process (`APP_ROLE=reducer`) with strict locking.
+
+Add variables:
+- `REDUCER_LOCK_TTL_SEC` (default `5`)
+- `REDUCER_LOCK_RETRY_MS` (default `20`)
+- `REDUCER_BATCH_SIZE` (default `50`)
+- `REDUCER_MAX_EVENT_LAG_MS` (default `2000`)
+
+Required checks:
+1. Reject stale event if `event.ts_ms < state.updated_ts_ms - REDUCER_MAX_EVENT_LAG_MS`.
+2. Reject duplicate if `idempotency_event_key` already committed.
+3. Write transition + recommendation in DB transaction boundary.
+
+### 13.5 Security plan
+
+Add authn/authz to all mutable endpoints.
+
+Variables:
+- `AUTH_ENABLED=1`
+- `JWT_ISSUER`
+- `JWT_AUDIENCE`
+- `JWT_PUBLIC_KEY_PEM`
+- `API_KEY_HASHES`
+- `ADMIN_ROLE_NAME=admin`
+- `OPERATOR_ROLE_NAME=operator`
+
+Policies:
+1. `POST/DELETE` game/config/calibration/replay endpoints require `operator`.
+2. Worker status/log endpoints require authenticated user.
+3. WebSocket requires token at connect time.
+4. CORS allowlist via `CORS_ALLOWED_ORIGINS`.
+
+### 13.6 Privacy and data governance plan
+
+Variables:
+- `STORE_RAW_FRAMES=0|1`
+- `FRAME_RETENTION_DAYS`
+- `EVENT_RETENTION_DAYS`
+- `RECOMMENDATION_RETENTION_DAYS`
+- `PII_REDACTION_ENABLED=1`
+
+Policies:
+1. Default `STORE_RAW_FRAMES=0` in production.
+2. TTL purge jobs for old events/transitions/recommendations.
+3. Export/delete by `game_id` for operator compliance workflows.
+
+### 13.7 Observability plan
+
+Metrics backend:
+- Prometheus + Grafana (or OpenTelemetry collector).
+
+Variables:
+- `METRICS_ENABLED=1`
+- `METRICS_NAMESPACE=cardsense`
+- `TRACE_ENABLED=1`
+- `TRACE_SAMPLE_RATE=0.1`
+- `LOG_LEVEL=INFO`
+- `LOG_JSON=1`
+
+Required metric names:
+1. `cardsense_recommendation_latency_ms_bucket`
+2. `cardsense_reducer_event_lag_ms`
+3. `cardsense_transition_reject_total{reason_code}`
+4. `cardsense_fusion_label_flip_rate`
+5. `cardsense_worker_skipped_out_of_order_total`
+6. `cardsense_ws_connected_clients`
+7. `cardsense_db_write_latency_ms`
+8. `cardsense_queue_depth_frames`
+9. `cardsense_queue_depth_detections`
+10. `cardsense_cautious_mode_rate`
+
+### 13.8 Alerting plan
+
+Create production alerts:
+1. `recommendation_latency_p95 > 300ms` for 10m
+2. `transition_reject_rate > 0.15` for 15m
+3. `worker_error_frames > threshold` for 10m
+4. `queue_depth_frames increasing for 10m`
+5. `ws_connected_clients drop > 50% in 5m`
+6. `db_write_failure_rate > 1%`
+
+### 13.9 Performance and scaling plan
+
+Variables:
+- `WORKER_AUTOSCALE_MIN`
+- `WORKER_AUTOSCALE_MAX`
+- `TARGET_QUEUE_DEPTH_PER_WORKER`
+- `FRAME_INGEST_RATE_LIMIT_FPS`
+- `WS_BROADCAST_BATCH_SIZE`
+
+Capacity methods:
+1. Scale workers on `queue_depth_frames`.
+2. Separate API and reducer pods/processes.
+3. Apply per-camera ingest rate limiting.
+4. Backpressure: reject ingest when queue depth exceeds hard cap.
+
+### 13.10 Deployment and release plan
+
+Use CI/CD with staging gate before production.
+
+Variables:
+- `DEPLOY_ENV=dev|staging|prod`
+- `RELEASE_VERSION`
+- `CANARY_PERCENT`
+- `FEATURE_FLAG_*`
+
+Release steps:
+1. Build immutable image tagged by git SHA.
+2. Run unit + integration + replay regression suite.
+3. Deploy canary (5-10% traffic).
+4. Watch SLO/alert board for 30-60 min.
+5. Roll forward to 100% or rollback automatically.
+
+### 13.11 Feature flags (required)
+
+Add flags:
+- `FEATURE_CALIBRATED_SEAT_MAPPING`
+- `FEATURE_STRICT_TRANSITION_REJECT`
+- `FEATURE_POLICY_SIMULATOR_V2`
+- `FEATURE_BELIEF_BAYES_UPDATE`
+- `FEATURE_DB_EVENT_PERSISTENCE`
+- `FEATURE_REPLAY_API`
+
+Each flag requires:
+1. default value
+2. owner
+3. removal date
+4. rollback behavior
+
+### 13.12 Production test matrix
+
+Must pass in CI and staging:
+1. Unit tests
+2. Integration tests (dual-camera stream)
+3. Contract tests (API/WS schemas)
+4. Replay regression tests
+5. Load tests (normal + overload)
+6. Chaos tests (worker crash, Redis restart, DB failover)
+7. Security tests (auth bypass, token expiry, role checks)
+
+### 13.13 Runbooks (required)
+
+Create operator runbooks:
+1. `RUNBOOK_QUEUE_BACKLOG.md`
+2. `RUNBOOK_WORKER_DEGRADATION.md`
+3. `RUNBOOK_TRANSITION_REJECT_SPIKE.md`
+4. `RUNBOOK_DB_LATENCY_SPIKE.md`
+5. `RUNBOOK_REPLAY_DEBUG.md`
+6. `RUNBOOK_CANARY_ROLLBACK.md`
+
+Each runbook must include:
+1. symptom
+2. dashboard links
+3. diagnostic commands
+4. immediate mitigation
+5. permanent fix workflow
+
+### 13.14 Production acceptance gates (go/no-go)
+
+Go-live only if all pass:
+1. `recommendation_latency_ms.p95 <= 300` and `p99 <= 700`.
+2. `illegal_transition_reject_rate` stable and explainable.
+3. 24h soak test with no data-loss in reducer/DB path.
+4. Replay determinism: same `simulation_seed` => stable ranked outputs.
+5. Security checklist signed (auth, role checks, secret handling).
+6. Rollback drill completed successfully in staging.
+
+### 13.15 Final completion criteria (production-grade)
+
+App is production-grade when:
+1. Features are complete (Sections 1-12).
+2. Reliability, security, observability, and ops controls in this section are implemented.
+3. SLOs are met continuously with alert coverage.
+4. On-call can diagnose and recover incidents using runbooks.

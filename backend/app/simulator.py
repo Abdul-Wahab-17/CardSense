@@ -8,6 +8,7 @@ from typing import List
 from .belief import sample_worlds
 from .models import ActionScore, CanonicalGameState
 from .rules import card_suit, legal_actions
+from .config import settings
 
 
 def _rank_value(card: str) -> int:
@@ -114,9 +115,14 @@ def evaluate_actions(state: CanonicalGameState, rollout_count: int = 96, simulat
             future_val = (rv / 14.0) * 0.28 + partner_support * 0.30 + preserve_bonus + rng.uniform(-0.10, 0.10)
             future_samples.append(future_val)
 
-            ev_now = 0.55 * p_win
-            ev_future = 0.30 * future_val
-            ev_partner = 0.15 * partner_support
+            if bool(settings.feature_policy_simulator_v2):
+                ev_now = 0.55 * p_win
+                ev_future = 0.30 * future_val
+                ev_partner = 0.15 * partner_support
+            else:
+                ev_now = 0.70 * p_win
+                ev_future = 0.20 * future_val
+                ev_partner = 0.10 * partner_support
             info_gain = 0.06 if not beats_table and same_suit_bonus <= 0 else 0.02
             ev_info = info_gain - (0.03 if rv > 11 else 0.0)
             ev_now_samples.append(ev_now)

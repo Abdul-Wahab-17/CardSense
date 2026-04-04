@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 import math
 
 from .models import Detection, DetectionEvent
+from .config import settings
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -108,6 +109,8 @@ class FusionEngine:
         return min(xs) <= x <= max(xs) and min(ys) <= y <= max(ys)
 
     def _seat_from_calibration(self, game_id: str, bbox: tuple[float, float, float, float], fallback: str) -> str:
+        if not bool(settings.feature_calibrated_seat_mapping):
+            return fallback
         cfg = self._calibration.get(game_id, {})
         seat_regions = cfg.get("seat_regions", {}) if isinstance(cfg, dict) else {}
         if not isinstance(seat_regions, dict) or not seat_regions:
