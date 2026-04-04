@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     hand_memory_events: int = 120
     min_card_votes: int = 1
     card_labels: str = ""
+    frame_id_dedupe_ttl_sec: int = 120
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

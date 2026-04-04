@@ -11,7 +11,7 @@ services:
       dockerfile: Dockerfile.backend
     container_name: cardsense-backend
     env_file:
-      - .env.example
+      - .env
     environment:
       REDIS_URL: redis://redis:6379/0
       FRAME_STREAM: frames
@@ -23,6 +23,7 @@ services:
       MIN_CARD_CONF: 0.02
       HAND_MEMORY_EVENTS: 400
       MIN_CARD_VOTES: 1
+      CARD_LABELS: AC,AD,AH,AS,KC,KD,KH,KS,QC,QD,QH,QS,JC,JD,JH,JS,10C,10D,10H,10S,9C,9D,9H,9S,8C,8D,8H,8S,7C,7D,7H,7S,6C,6D,6H,6S,5C,5D,5H,5S,4C,4D,4H,4S,3C,3D,3H,3S,2C,2D,2H,2S
     depends_on:
       - redis
     ports:
@@ -33,22 +34,27 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     env_file:
-      - .env.example
+      - .env
     environment:
       REDIS_URL: redis://redis:6379/0
       FRAME_STREAM: frames
       DETECTION_STREAM: detections
       FRAME_CONSUMER_GROUP: yolo_workers
       WORKER_NAME: worker-${HOSTNAME:-local}
-      WORKER_PROCESSES: 1
-      YOLO_MODEL: /app/models/playing_cards_best.pt
-      YOLO_MODEL_URL: https://raw.githubusercontent.com/noorkhokhar99/Playing-Cards-Detection-with-YoloV8/main/yolov8s_playing_cards.pt
-      MODEL_CACHE_DIR: /tmp/cardsense-models
-      CONF_THRES: 0.02
-      DEBUG_CONF: 0.001
-      MAX_FRAME_AGE_MS: 1500
-      SLOW_ACCURATE_MODE: 1
-      MAX_QUEUE_LEN: 5000
+      WORKER_PROCESSES: ${WORKER_PROCESSES:-1}
+      YOLO_MODEL: ${YOLO_MODEL:-playing-cards-auto.pt}
+      YOLO_MODEL_URL: ${YOLO_MODEL_URL:-}
+      MODEL_CACHE_DIR: ${MODEL_CACHE_DIR:-/tmp/cardsense-models}
+      CONF_THRES: ${CONF_THRES:-0.03}
+      DEBUG_CONF: ${DEBUG_CONF:-0.001}
+      MAX_FRAME_AGE_MS: ${MAX_FRAME_AGE_MS:-1500}
+      SLOW_ACCURATE_MODE: ${SLOW_ACCURATE_MODE:-1}
+      MAX_QUEUE_LEN: ${MAX_QUEUE_LEN:-5000}
+      WORKER_LOG_STREAM: ${WORKER_LOG_STREAM:-worker_logs}
+      WORKER_STATUS_PREFIX: ${WORKER_STATUS_PREFIX:-worker:status}
+      WORKER_HEARTBEAT_SEC: ${WORKER_HEARTBEAT_SEC:-5}
+      MODEL_SMOKE_TEST_URLS: ${MODEL_SMOKE_TEST_URLS:-}
+      MODEL_SMOKE_MIN_DETECTIONS: ${MODEL_SMOKE_MIN_DETECTIONS:-1}
     volumes:
       - ./models:/app/models
     depends_on:

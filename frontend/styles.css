@@ -11,6 +11,48 @@ main {
   padding: 0 16px;
 }
 
+.status-bar {
+  position: sticky;
+  top: 8px;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: rgba(2, 6, 23, 0.92);
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 14px;
+  backdrop-filter: blur(4px);
+}
+
+.status-chip {
+  border: 1px solid #334155;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.82rem;
+  color: #e2e8f0;
+  background: #111827;
+}
+
+.status-chip.ok {
+  border-color: #14532d;
+  background: #052e16;
+  color: #bbf7d0;
+}
+
+.status-chip.warn {
+  border-color: #713f12;
+  background: #451a03;
+  color: #fde68a;
+}
+
+.status-chip.bad {
+  border-color: #7f1d1d;
+  background: #450a0a;
+  color: #fecaca;
+}
+
 .card {
   background: #111827;
   border: 1px solid #1f2937;

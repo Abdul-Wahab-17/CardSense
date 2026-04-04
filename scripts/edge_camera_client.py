@@ -1,6 +1,7 @@
 import argparse
 import base64
 import time
+import uuid
 
 import cv2
 import requests
@@ -23,7 +24,7 @@ def flush_batch(base_url: str, batch: list[dict]) -> None:
     requests.post(f"{base_url}/api/frames/batch", json={"frames": batch}, timeout=10).raise_for_status()
 
 
-def send_frames(base_url: str, camera_id: str, source: str, fps: float, batch_size: int) -> None:
+def send_frames(base_url: str, game_id: str, camera_id: str, camera_type: str, source: str, fps: float, batch_size: int) -> None:
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open source: {source}")
@@ -48,7 +49,10 @@ def send_frames(base_url: str, camera_id: str, source: str, fps: float, batch_si
 
         frame_b64 = base64.b64encode(jpg.tobytes()).decode("utf-8")
         payload = {
+            "game_id": game_id,
             "camera_id": camera_id,
+            "camera_type": camera_type,
+            "frame_id": f"{camera_id}:{int(now * 1000)}:{uuid.uuid4().hex[:8]}",
             "frame_b64": frame_b64,
             "ts_ms": int(now * 1000),
         }
@@ -65,7 +69,9 @@ def send_frames(base_url: str, camera_id: str, source: str, fps: float, batch_si
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://localhost:8000")
+    parser.add_argument("--game-id", default="default-game")
     parser.add_argument("--camera-id", default="cam-1")
+    parser.add_argument("--camera-type", default="hand", choices=["hand", "table"])
     parser.add_argument("--source", default="0", help="OpenCV source index or RTSP/file URL")
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -74,7 +80,7 @@ def main() -> None:
     source = int(args.source) if args.source.isdigit() else args.source
     register(args.base_url, args.camera_id, str(source))
     print(f"Registered {args.camera_id}. Streaming frames...")
-    send_frames(args.base_url, args.camera_id, source, args.fps, args.batch_size)
+    send_frames(args.base_url, args.game_id, args.camera_id, args.camera_type, source, args.fps, args.batch_size)
 
 
 if __name__ == "__main__":

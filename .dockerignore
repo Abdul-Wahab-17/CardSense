@@ -8,3 +8,13 @@ venv/
 .git/
 .gitignore
 *.ipynb
+
+# Large runtime artifacts (mounted at runtime, not needed in build context)
+models/
+java/
+
+# Local caches and outputs
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
