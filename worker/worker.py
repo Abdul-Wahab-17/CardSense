@@ -1,5 +1,6 @@
 import json
 import os
+import hashlib
 import time
 import uuid
 from multiprocessing import Process
@@ -62,6 +63,15 @@ MODEL_SMOKE_TEST_URLS = [
     if value.strip()
 ]
 MODEL_SMOKE_MIN_DETECTIONS = int(os.getenv("MODEL_SMOKE_MIN_DETECTIONS", "1"))
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "filesystem")
+MODEL_REF_HAND = os.getenv("MODEL_REF_HAND", "")
+MODEL_REF_TABLE = os.getenv("MODEL_REF_TABLE", "")
+MODEL_REGISTRY_URL = os.getenv("MODEL_REGISTRY_URL", "")
+MODEL_REGISTRY_TOKEN = os.getenv("MODEL_REGISTRY_TOKEN", "")
+MODEL_SHA256_HAND = os.getenv("MODEL_SHA256_HAND", "")
+MODEL_SHA256_TABLE = os.getenv("MODEL_SHA256_TABLE", "")
+WORKER_SUPPORTS_HAND = os.getenv("WORKER_SUPPORTS_HAND", "1") == "1"
+WORKER_SUPPORTS_TABLE = os.getenv("WORKER_SUPPORTS_TABLE", "1") == "1"
 
 
 def infer(model: YOLO, image, conf: float):
@@ -178,6 +188,79 @@ def ensure_model() -> str:
         raise RuntimeError(f"All model downloads failed. Last error: {last_error}")
 
     return str(target)
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_to_path(url: str, target: Path, token: str = "") -> str:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with requests.get(url, stream=True, timeout=300, headers=headers) as response:
+        response.raise_for_status()
+        with open(target, "wb") as file_obj:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    file_obj.write(chunk)
+    return str(target)
+
+
+def resolve_model_artifact(target_model_type: str) -> str:
+    model_type = (target_model_type or "hand").lower()
+    model_ref = (MODEL_REF_HAND if model_type == "hand" else MODEL_REF_TABLE) or MODEL_NAME
+    checksum_expected = (MODEL_SHA256_HAND if model_type == "hand" else MODEL_SHA256_TABLE).strip().lower()
+
+    cache_dir = Path(MODEL_CACHE_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved = ""
+    provider = str(MODEL_PROVIDER or "filesystem").lower()
+
+    if provider == "filesystem":
+        if model_ref and Path(model_ref).exists():
+            resolved = str(Path(model_ref))
+        else:
+            resolved = ensure_model()
+    elif provider == "http":
+        if not model_ref:
+            raise RuntimeError("MODEL_REF_* is required for MODEL_PROVIDER=http")
+        parsed = urlparse(model_ref)
+        filename = Path(parsed.path).name or f"{model_type}.pt"
+        if not filename.endswith(".pt") and not filename.endswith(".onnx"):
+            filename = f"{filename}.pt"
+        target = cache_dir / filename
+        if not (target.exists() and target.stat().st_size > 0):
+            resolved = _download_to_path(model_ref, target, token=MODEL_REGISTRY_TOKEN)
+        else:
+            resolved = str(target)
+    elif provider == "s3":
+        # Use registry resolver endpoint to fetch s3 object without boto dependency.
+        if not MODEL_REGISTRY_URL:
+            raise RuntimeError("MODEL_REGISTRY_URL is required for MODEL_PROVIDER=s3")
+        if not model_ref:
+            raise RuntimeError("MODEL_REF_* is required for MODEL_PROVIDER=s3")
+        resolver = f"{MODEL_REGISTRY_URL.rstrip('/')}/resolve?ref={model_ref}"
+        filename = Path(urlparse(model_ref).path).name or f"{model_type}.pt"
+        target = cache_dir / filename
+        if not (target.exists() and target.stat().st_size > 0):
+            resolved = _download_to_path(resolver, target, token=MODEL_REGISTRY_TOKEN)
+        else:
+            resolved = str(target)
+    else:
+        raise RuntimeError(f"Unsupported MODEL_PROVIDER: {provider}")
+
+    if checksum_expected:
+        checksum_actual = _sha256_file(resolved).strip().lower()
+        if checksum_actual != checksum_expected:
+            raise RuntimeError(
+                f"Checksum mismatch for {model_type}: expected={checksum_expected} actual={checksum_actual}"
+            )
+
+    return resolved
 
 
 def map_bbox_to_original(x1: float, y1: float, x2: float, y2: float, angle: int, width: int, height: int) -> tuple[float, float, float, float]:
@@ -464,6 +547,7 @@ def summarize_model_names(model: YOLO) -> dict:
         "card_like_count": card_like,
         "card_like_examples": card_examples,
         "sample_labels": labels[:12],
+        "model_provider": MODEL_PROVIDER,
     }
 
 
@@ -491,8 +575,19 @@ def write_worker_status(r: redis.Redis, worker_name: str, status: dict) -> None:
 
 
 def run_worker(consumer_name: str) -> None:
-    resolved_model = ensure_model()
-    model = YOLO(resolved_model)
+    resolved_models: dict[str, str] = {}
+    model_by_type: dict[str, YOLO] = {}
+    if WORKER_SUPPORTS_HAND:
+        resolved_models["hand"] = resolve_model_artifact("hand")
+        model_by_type["hand"] = YOLO(resolved_models["hand"])
+    if WORKER_SUPPORTS_TABLE:
+        resolved_models["table"] = resolve_model_artifact("table")
+        model_by_type["table"] = YOLO(resolved_models["table"])
+    if not model_by_type:
+        raise RuntimeError("Worker does not support hand or table processing")
+
+    model = model_by_type.get("hand") or model_by_type.get("table")
+    resolved_model = resolved_models.get("hand") or resolved_models.get("table") or MODEL_NAME
 
     r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
     ensure_group(r, FRAME_STREAM, FRAME_GROUP)
@@ -541,6 +636,7 @@ def run_worker(consumer_name: str) -> None:
         {
             "model_name": MODEL_NAME,
             "resolved_model": resolved_model,
+            "resolved_models": resolved_models,
             "model_summary": model_summary,
             **stats,
         },
@@ -590,6 +686,13 @@ def run_worker(consumer_name: str) -> None:
                     game_id = payload.get("game_id", "default-game")
                     camera_type = payload.get("camera_type", "hand")
                     frame_id = payload.get("frame_id", f"{camera_id}:{payload.get('ts_ms', '')}")
+                    target_model_type = payload.get("target_model_type", camera_type)
+                    route_type = str(target_model_type or camera_type or "hand").lower()
+                    if route_type == "hand" and not WORKER_SUPPORTS_HAND:
+                        continue
+                    if route_type == "table" and not WORKER_SUPPORTS_TABLE:
+                        continue
+
                     ts_ms = int(payload["ts_ms"])
                     frame_b64 = payload["frame_b64"]
                     age_ms = int(time.time() * 1000) - ts_ms
@@ -612,8 +715,11 @@ def run_worker(consumer_name: str) -> None:
                             )
                         continue
 
+                    selected_model = model_by_type.get(route_type) or model
+                    selected_resolved_model = resolved_models.get(route_type) or resolved_model
+
                     image = decode_b64_to_image(frame_b64)
-                    detections, debug_details = predict_with_fallback(model, image, CONF_THRES)
+                    detections, debug_details = predict_with_fallback(selected_model, image, CONF_THRES)
                     quality = image_quality(image)
                     quality_flags = {
                         "is_blurry": float(quality.get("blur_var", 0.0)) < 75.0,
@@ -645,8 +751,9 @@ def run_worker(consumer_name: str) -> None:
                         "camera_id": camera_id,
                         "ts_ms": ts_ms,
                         "model_name": MODEL_NAME,
-                        "resolved_model": resolved_model,
+                        "resolved_model": selected_resolved_model,
                         "worker_name": consumer_name,
+                        "target_model_type": target_model_type,
                         "latency_ms": latency_ms,
                         "detections": detections,
                         "debug": {
@@ -657,6 +764,7 @@ def run_worker(consumer_name: str) -> None:
                             "age_ms": age_ms,
                             "max_frame_age_ms": MAX_FRAME_AGE_MS,
                             "model_summary": model_summary,
+                            "resolved_models": resolved_models,
                             **debug_details,
                         },
                     }
@@ -706,6 +814,10 @@ def run_worker(consumer_name: str) -> None:
                         {
                             "model_name": MODEL_NAME,
                             "resolved_model": resolved_model,
+                            "resolved_models": resolved_models,
+                            "supports_hand": bool(WORKER_SUPPORTS_HAND),
+                            "supports_table": bool(WORKER_SUPPORTS_TABLE),
+                            "model_version": Path(resolved_model).name,
                             "model_summary": model_summary,
                             **stats,
                         },

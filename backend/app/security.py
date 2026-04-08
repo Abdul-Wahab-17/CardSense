@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import time
+import uuid
 from typing import Any
 
 from fastapi import Depends, Header, HTTPException, status
@@ -15,6 +17,16 @@ except Exception:  # pragma: no cover
 
 
 bearer = HTTPBearer(auto_error=False)
+_REVOKED_JTI: set[str] = set()
+
+
+def revoke_jti(jti: str) -> None:
+    if jti:
+        _REVOKED_JTI.add(str(jti))
+
+
+def is_jti_revoked(jti: str | None) -> bool:
+    return bool(jti and str(jti) in _REVOKED_JTI)
 
 
 def _api_hashes() -> set[str]:
@@ -28,19 +40,55 @@ def _hash_token(token: str) -> str:
 def _decode_jwt(token: str) -> dict[str, Any]:
     if jwt is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="JWT library unavailable")
-    if not settings.jwt_public_key_pem:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="JWT public key not configured")
     try:
-        claims = jwt.decode(
-            token,
-            settings.jwt_public_key_pem,
-            algorithms=["RS256", "ES256"],
-            audience=settings.jwt_audience or None,
-            issuer=settings.jwt_issuer or None,
-            options={"verify_aud": bool(settings.jwt_audience)},
-        )
+        if settings.jwt_public_key_pem:
+            claims = jwt.decode(
+                token,
+                settings.jwt_public_key_pem,
+                algorithms=["RS256", "ES256"],
+                audience=settings.jwt_audience or None,
+                issuer=settings.jwt_issuer or None,
+                options={"verify_aud": bool(settings.jwt_audience)},
+            )
+        else:
+            claims = jwt.decode(
+                token,
+                settings.jwt_hs256_secret,
+                algorithms=["HS256"],
+                audience=settings.jwt_audience or None,
+                issuer=settings.jwt_issuer or None,
+                options={"verify_aud": bool(settings.jwt_audience)},
+            )
         if not isinstance(claims, dict):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+
+        now = int(time.time())
+        iat = int(claims.get("iat", 0) or 0)
+        exp = int(claims.get("exp", 0) or 0)
+        if iat <= 0 or exp <= 0:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing iat/exp claims")
+        if exp <= now:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+        if iat > (now + 60):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid iat claim")
+
+        if bool(settings.auth_strict_iss_aud) and str(settings.deploy_env).lower() in {"prod", "production"}:
+            if not settings.jwt_issuer or not settings.jwt_audience:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Issuer/audience not configured")
+            if str(claims.get("iss", "")) != str(settings.jwt_issuer):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Issuer mismatch")
+            aud = claims.get("aud")
+            aud_values = [aud] if isinstance(aud, str) else list(aud or [])
+            if str(settings.jwt_audience) not in {str(v) for v in aud_values}:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Audience mismatch")
+
+        if bool(settings.auth_enforce_jti):
+            jti = str(claims.get("jti", ""))
+            if not jti:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing jti claim")
+            if is_jti_revoked(jti):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
+
         return claims
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid token: {exc}")
@@ -89,3 +137,28 @@ def ws_validate_token(token: str | None) -> dict[str, Any]:
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing websocket token")
     return _decode_jwt(token)
+
+
+def issue_access_token(user_id: int, roles: list[str], session_id: str, ttl_sec: int) -> dict[str, Any]:
+    if jwt is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="JWT library unavailable")
+    now = int(time.time())
+    exp = now + max(int(ttl_sec), 60)
+    claims = {
+        "sub": str(user_id),
+        "roles": roles,
+        "session_id": session_id,
+        "jti": str(uuid.uuid4()),
+        "iat": now,
+        "exp": exp,
+    }
+    if settings.jwt_issuer:
+        claims["iss"] = settings.jwt_issuer
+    if settings.jwt_audience:
+        claims["aud"] = settings.jwt_audience
+
+    if settings.jwt_private_key_pem:
+        token = jwt.encode(claims, settings.jwt_private_key_pem, algorithm="RS256")
+    else:
+        token = jwt.encode(claims, settings.jwt_hs256_secret, algorithm="HS256")
+    return {"jwt_access_token": token, "exp_ts": exp, "session_id": session_id or str(uuid.uuid4())}

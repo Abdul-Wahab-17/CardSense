@@ -1,6 +1,12 @@
 # CardSense Master Completion Plan (Near-100% Target)
 
-Last updated: 2026-04-04
+Last updated: 2026-04-08
+
+## M2 production execution artifacts
+
+- Sprint board: `M2_SPRINT_BOARD.md`
+- Jira-style backlog: `M2_JIRA_BACKLOG.md`
+- Execution mode: all six sprints defined as deployable increments with mandatory P0 exit gates.
 
 ## Execution snapshot (implemented in this pass)
 

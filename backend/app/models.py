@@ -7,6 +7,9 @@ class FrameIn(BaseModel):
     camera_id: str = Field(..., min_length=1)
     camera_type: str = Field(default="hand", pattern="^(hand|table)$")
     frame_id: str = Field(default="")
+    target_model_type: Literal["hand", "table"] | None = None
+    device_id: str | None = None
+    session_id: str | None = None
     frame_b64: str = Field(..., min_length=10, description="Base64 JPEG/PNG frame")
     ts_ms: int = Field(..., ge=0)
 
@@ -90,6 +93,9 @@ class TurnState(BaseModel):
 
 class GameRules(BaseModel):
     variant_name: str = "default"
+    seat_order: List[str] = Field(default_factory=lambda: ["me", "left", "across", "right"])
+    play_direction: Literal["clockwise", "counterclockwise"] = "clockwise"
+    trick_size: int = 4
     must_follow_suit: bool = True
     must_trump_if_void: bool = False
     trump_mode: str = "variant_config"
@@ -153,6 +159,13 @@ class CanonicalGameState(BaseModel):
 class GameStartIn(BaseModel):
     game_id: str = Field(..., min_length=1)
     variant_name: str = "default"
+    player_count: int = 4
+    seat_order: List[str] = Field(default_factory=lambda: ["me", "left", "across", "right"])
+    play_direction: Literal["clockwise", "counterclockwise"] = "clockwise"
+    rounds_total: int | None = None
+    target_points: int | None = None
+    trick_size: int = 4
+    team_map: Dict[str, str] = Field(default_factory=lambda: {"me": "team_me", "across": "team_me", "left": "team_opp", "right": "team_opp"})
     leader: str = "me"
     to_play: str = "me"
     must_follow_suit: bool = True
@@ -164,6 +177,9 @@ class GameStartIn(BaseModel):
 
 class GameConfigIn(BaseModel):
     variant_name: Optional[str] = None
+    seat_order: Optional[List[str]] = None
+    play_direction: Optional[Literal["clockwise", "counterclockwise"]] = None
+    trick_size: Optional[int] = None
     leader: Optional[str] = None
     to_play: Optional[str] = None
     lead_suit: Optional[str] = None
@@ -176,6 +192,9 @@ class GameConfigIn(BaseModel):
 
 class ActionScore(BaseModel):
     card: str
+    rule_validity_score: float = 0.0
+    state_stability_score: float = 0.0
+    info_value_score: float = 0.0
     p_win_current_trick: float
     expected_future_trick_value: float
     partner_support_value: float
@@ -214,3 +233,100 @@ class TableCalibrationIn(BaseModel):
     trick_region: List[List[float]] = Field(default_factory=list)
     won_pile_regions: Dict[str, List[List[float]]] = Field(default_factory=dict)
     occlusion_timeout_ms: int = 2000
+
+
+class VariantConfig(BaseModel):
+    variant_id: str = "default"
+    player_count: int = 4
+    seat_order: List[str] = Field(default_factory=lambda: ["me", "left", "across", "right"])
+    play_direction: Literal["clockwise", "counterclockwise"] = "clockwise"
+    team_mode: Literal["teams", "solo"] = "teams"
+    team_map: Dict[str, str] = Field(default_factory=lambda: {"me": "team_me", "across": "team_me", "left": "team_opp", "right": "team_opp"})
+    cards_per_player: int = 13
+    trick_size: int = 4
+    rounds_total: int | None = None
+    target_points: int | None = None
+    must_follow_suit: bool = True
+    must_trump_if_void: bool = False
+    trump_policy: Literal["none", "fixed", "round_declared"] = "fixed"
+    trump_suit: str = ""
+    rank_order_map: Dict[str, int] = Field(default_factory=lambda: GameRules().rank_order_map)
+    deck_cards: List[str] = Field(default_factory=list)
+
+
+class CardLifecycleEntry(BaseModel):
+    location: Literal["in_hand", "on_table", "won_pile", "unknown"] = "unknown"
+    owner_seat: str | None = None
+    seen_ts_ms: int = 0
+    last_transition: str = ""
+    confidence: float = 0.0
+
+
+class MatchState(BaseModel):
+    game_id: str
+    phase: Literal["setup", "deal", "in_round", "round_end", "match_end"] = "setup"
+    round_index: int = 0
+    dealer_seat: str = "me"
+    leader_seat: str = "me"
+    to_play_seat: str = "me"
+    lead_suit: str = ""
+    trick_id: int = 1
+    table_cards: List[TableTrickCard] = Field(default_factory=list)
+    played_history: List[PlayedHistoryItem] = Field(default_factory=list)
+    team_points: Dict[str, int] = Field(default_factory=dict)
+    team_tricks: Dict[str, int] = Field(default_factory=dict)
+    round_winner_team: str | None = None
+    match_winner_team: str | None = None
+    variant: VariantConfig = Field(default_factory=VariantConfig)
+    card_lifecycle: Dict[str, CardLifecycleEntry] = Field(default_factory=dict)
+
+
+class CameraBindIn(BaseModel):
+    camera_id: str
+    camera_type: Literal["hand", "table"]
+    seat_hint: str | None = None
+    device_label: str = ""
+    stream_profile: Literal["low_latency", "balanced", "high_accuracy"] = "balanced"
+
+
+class CameraSessionState(BaseModel):
+    game_id: str
+    camera_id: str
+    camera_type: Literal["hand", "table"]
+    seat_hint: str | None = None
+    device_label: str = ""
+    stream_profile: Literal["low_latency", "balanced", "high_accuracy"] = "balanced"
+    camera_online: bool = False
+    last_frame_ts_ms: int = 0
+    frame_rate_actual: float = 0.0
+    latency_ms_p50: float = 0.0
+    latency_ms_p95: float = 0.0
+    drop_rate: float = 0.0
+
+
+class AuthRegisterIn(BaseModel):
+    email: str
+    password: str = Field(min_length=8)
+    display_name: str = ""
+
+
+class AuthLoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class AuthRefreshIn(BaseModel):
+    refresh_token: str
+
+
+class AuthLogoutIn(BaseModel):
+    refresh_token: str
+
+
+class VariantSetIn(BaseModel):
+    variant: VariantConfig
+
+
+class RoundStartIn(BaseModel):
+    round_index: int
+    dealer_seat: str

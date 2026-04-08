@@ -12,10 +12,12 @@ from pydantic import ValidationError
 
 from .config import settings
 from .belief import belief_diagnostics, build_belief
+from .auth_store import AuthStore
 from .autoscaler import compute_desired_workers
 from .feature_flags import FEATURE_FLAGS_METADATA
 from .fusion import FusionEngine
 from .game_state import GameStateEngine
+from .match_engine import MatchEngine
 from .models import (
     ActionScore,
     AdvisorAlternative,
@@ -25,16 +27,33 @@ from .models import (
     DetectionEvent,
     FrameBatchIn,
     FrameIn,
+    AuthLoginIn,
+    AuthLogoutIn,
+    AuthRefreshIn,
+    AuthRegisterIn,
+    CameraBindIn,
+    CameraSessionState,
     GameConfigIn,
     GameStartIn,
     HandAdvice,
     HandCard,
     HandOverrideIn,
     HandState,
+    RoundStartIn,
     TableCalibrationIn,
+    VariantSetIn,
 )
 from .redis_client import redis_client
-from .security import require_auth_roles, ws_validate_token
+from .security import issue_access_token, require_auth_roles, revoke_jti, ws_validate_token
+from .recommendation_v2 import (
+    build_belief_state,
+    compute_legal_actions,
+    explain_recommendation,
+    sample_hidden_worlds_v2,
+    score_actions_v2,
+    select_recommendation,
+    simulate_action_batch,
+)
 from .simulator import evaluate_actions
 from .storage import EventStore
 from .thulla import build_thulla_advice
@@ -359,6 +378,9 @@ pipeline_metrics = {
     "metrics_deduped_frames": 0,
 }
 event_store = EventStore()
+auth_store = AuthStore()
+match_engine = MatchEngine()
+camera_sessions: dict[str, dict[str, CameraSessionState]] = defaultdict(dict)
 last_ingest_ts_ms_by_camera: dict[str, int] = {}
 storage_metrics = {
     "event_write_ms": 0.0,
@@ -376,7 +398,17 @@ def _build_advisor_response(
 ) -> AdvisorResponse:
     started = time.time()
     state = game_state_engine.get(game_id)
-    action_scores: list[ActionScore] = evaluate_actions(state, simulation_seed=simulation_seed)
+    if bool(settings.feature_policy_simulator_v2):
+        legal = compute_legal_actions(state, "me")
+        belief_state = build_belief_state(state, history=[h.model_dump() for h in state.played_history], config={})
+        worlds = sample_hidden_worlds_v2(state, belief_state, n=64, seed=simulation_seed)
+        simulated = simulate_action_batch(state, legal, worlds, seed=simulation_seed)
+        action_scores = score_actions_v2(state, legal, simulated, belief_state)
+    else:
+        legal = evaluate_actions(state, simulation_seed=simulation_seed)
+        action_scores = list(legal)
+        belief_state = {"belief": build_belief(state)}
+
     if not action_scores:
         out = AdvisorResponse(
             best_action=AdvisorBestAction(card="", ev=0.0, confidence=0.0),
@@ -399,9 +431,25 @@ def _build_advisor_response(
             storage_metrics["recommendation_write_ms"] = round((time.time() - started) * 1000.0, 3)
         return out
 
-    best = action_scores[0]
+    best = select_recommendation(action_scores, compute_legal_actions(state, "me"))
+    if best is None:
+        out = AdvisorResponse(
+            best_action=AdvisorBestAction(card="", ev=0.0, confidence=0.0),
+            alternatives=[],
+            why=["No legal recommendation available"],
+            uncertainty_notes=["All candidate actions failed legal filter"],
+            recommendation_mode="cautious",
+            freshness_ts_ms=state.updated_ts_ms,
+            action_scores=[],
+        )
+        if persist and bool(settings.feature_db_event_persistence):
+            started = time.time()
+            event_store.log_recommendation(game_id, int(time.time() * 1000), out.model_dump())
+            storage_metrics["recommendation_write_ms"] = round((time.time() - started) * 1000.0, 3)
+        return out
+
     alternatives = [AdvisorAlternative(card=a.card, ev=a.total_ev) for a in action_scores[1:3]]
-    belief = build_belief(state)
+    belief = belief_state.get("belief", {})
     belief_mass = sum(len(cards) for cards in belief.values())
 
     uncertainty_notes = list(state.uncertainty.notes)
@@ -415,11 +463,19 @@ def _build_advisor_response(
     confidence = max(0.0, min(1.0, (1.0 - best.risk) * state.uncertainty.state_conf))
     mode = "normal" if confidence >= 0.60 else "cautious"
 
-    why = [
-        "Follows legal move constraints",
-        "Maximizes expected value across sampled hidden-card worlds",
-        "Balances immediate trick win chance and future partner support",
+    # If a bound camera has gone stale, force cautious mode.
+    stale_threshold_ms = int(settings.camera_stale_threshold_ms)
+    sessions = list(camera_sessions.get(game_id, {}).values())
+    now_ms = int(time.time() * 1000)
+    stale_bound = [
+        s for s in sessions if int(s.last_frame_ts_ms or 0) > 0 and (now_ms - int(s.last_frame_ts_ms or 0)) > stale_threshold_ms
     ]
+    if stale_bound:
+        mode = "cautious"
+        uncertainty_notes.append("One or more bound cameras are stale")
+
+    why, v2_notes = explain_recommendation(state, best, belief_state)
+    uncertainty_notes.extend(v2_notes)
     if state.turn.lead_suit:
         why.insert(0, f"Lead suit is {state.turn.lead_suit}; legal filtering applied")
 
@@ -478,6 +534,46 @@ def _ingest_allowed(camera_id: str, ts_ms: int) -> bool:
         return False
     last_ingest_ts_ms_by_camera[camera_id] = ts_ms
     return True
+
+
+def select_worker_route(camera_type: str, target_model_type: str | None, worker_capabilities: list[dict] | None = None) -> str:
+    model_type = (target_model_type or camera_type or "hand").lower()
+    if worker_capabilities:
+        for worker in worker_capabilities:
+            if model_type == "hand" and bool(worker.get("supports_hand", False)):
+                return "route:hand"
+            if model_type == "table" and bool(worker.get("supports_table", False)):
+                return "route:table"
+    return f"route:{model_type if model_type in {'hand', 'table'} else 'hand'}"
+
+
+def _touch_camera_session(game_id: str, camera_id: str, ts_ms: int) -> None:
+    session = camera_sessions.get(game_id, {}).get(camera_id)
+    if session is None:
+        return
+    last_ts = int(session.last_frame_ts_ms or 0)
+    session.camera_online = True
+    session.last_frame_ts_ms = int(ts_ms)
+    if last_ts > 0 and ts_ms > last_ts:
+        dt = max(1, int(ts_ms) - last_ts)
+        session.frame_rate_actual = round(1000.0 / float(dt), 3)
+        expected = max(float(settings.frame_ingest_rate_limit_fps), 0.001)
+        observed = max(float(session.frame_rate_actual), 0.0)
+        session.drop_rate = round(max(0.0, min(1.0, (expected - observed) / expected)), 4)
+    latency_ms = max(0, int(time.time() * 1000) - int(ts_ms))
+    # Rolling estimate without unbounded history.
+    session.latency_ms_p50 = round((float(session.latency_ms_p50) * 0.85) + (float(latency_ms) * 0.15), 3)
+    session.latency_ms_p95 = round(max(float(session.latency_ms_p95) * 0.90, float(latency_ms)), 3)
+
+
+def _require_bound_camera(game_id: str, camera_id: str, camera_type: str) -> None:
+    if not bool(settings.feature_enforce_camera_binding):
+        return
+    session = camera_sessions.get(game_id, {}).get(camera_id)
+    if session is None:
+        raise HTTPException(status_code=403, detail="Camera must be bound to game before ingest")
+    if str(session.camera_type) != str(camera_type):
+        raise HTTPException(status_code=403, detail="Bound camera type mismatch")
 
 
 async def consume_detections() -> None:
@@ -540,6 +636,25 @@ async def consume_detections() -> None:
                     )
                     game_state, transition = game_state_engine.apply_fused_observation(fused)
 
+                    # Keep lifecycle reconciliation and transition events centralized in match-engine state.
+                    match_engine.reconcile_card_locations(
+                        parsed.game_id,
+                        hand_cards=list(game_state.hand_cards),
+                        table_cards=[t.model_dump() for t in game_state.table_trick_cards],
+                        won_piles=dict(game_state.won_piles),
+                        ts_ms=int(game_state.updated_ts_ms),
+                    )
+                    match_transition = match_engine.apply_transition_events(
+                        parsed.game_id,
+                        {
+                            "accepted": transition.accepted,
+                            "reason": transition.reason,
+                            "reason_code": transition.reason_code,
+                            "table_size": len(game_state.table_trick_cards),
+                        },
+                        allow_won_pile_replay=bool(settings.allow_won_pile_replay),
+                    )
+
                     hand_state = hand_state_store.update(
                         parsed,
                         source_worker=str(event.get("worker_name", "")),
@@ -557,6 +672,7 @@ async def consume_detections() -> None:
                         "reason_code": transition.reason_code,
                         "reason_detail": transition.reason_detail,
                     }
+                    event["match_transition"] = match_transition
                     if bool(settings.feature_db_event_persistence):
                         redacted = _redact_event(event)
                         started = time.time()
@@ -666,6 +782,11 @@ async def lifespan(_: FastAPI):
             )
         except Exception:
             pass
+
+    # In prod, do not allow the default symmetric secret.
+    if str(settings.deploy_env).lower() in {"prod", "production"} and bool(settings.auth_prod_secret_required):
+        if (not settings.jwt_private_key_pem) and str(settings.jwt_hs256_secret).strip() == "dev-secret-change-me":
+            raise RuntimeError("Refusing startup in production with default JWT secret")
     try:
         yield
     finally:
@@ -782,6 +903,16 @@ async def metrics() -> dict:
         "gt_500": 1 if avg_ms > 500 else 0,
     }
     worker_rows = await _worker_status_rows()
+    now = int(time.time() * 1000)
+    all_sessions = [s for group in camera_sessions.values() for s in group.values()]
+    stale_count = sum(
+        1
+        for s in all_sessions
+        if int(s.last_frame_ts_ms or 0) > 0 and (now - int(s.last_frame_ts_ms or 0)) > int(settings.camera_stale_threshold_ms)
+    )
+    stale_rate = round(float(stale_count) / max(len(all_sessions), 1), 6)
+    queue_depth_frames = int(await redis_client.xlen(settings.frame_stream))
+    queue_lag_ratio = round(queue_depth_frames / max(int(settings.max_queue_len), 1), 6)
     return {
         "games_total": len(states),
         "recommendation_mode": {"normal": normal, "cautious": cautious},
@@ -820,8 +951,10 @@ async def metrics() -> dict:
             - max([int(s.updated_ts_ms or 0) for s in states] or [int(time.time() * 1000)]),
         ),
         "cardsense_ws_connected_clients": await hub.client_count(),
-        "cardsense_queue_depth_frames": int(await redis_client.xlen(settings.frame_stream)),
+        "cardsense_queue_depth_frames": queue_depth_frames,
         "cardsense_queue_depth_detections": int(await redis_client.xlen(settings.detection_stream)),
+        "cardsense_stale_camera_rate": stale_rate,
+        "cardsense_queue_lag_ratio": queue_lag_ratio,
         "cardsense_db_write_latency_ms": storage_metrics,
     }
 
@@ -841,6 +974,8 @@ async def prometheus_metrics() -> Response:
     lines.append(f"cardsense_ws_connected_clients {float(payload.get('cardsense_ws_connected_clients', 0))}")
     lines.append(f"cardsense_queue_depth_frames {float(payload.get('cardsense_queue_depth_frames', 0))}")
     lines.append(f"cardsense_queue_depth_detections {float(payload.get('cardsense_queue_depth_detections', 0))}")
+    lines.append(f"cardsense_stale_camera_rate {float(payload.get('cardsense_stale_camera_rate', 0))}")
+    lines.append(f"cardsense_queue_lag_ratio {float(payload.get('cardsense_queue_lag_ratio', 0))}")
     lines.append(f"cardsense_cautious_mode_rate {float(payload.get('cardsense_cautious_mode_rate', 0))}")
     transition_reject = payload.get("cardsense_transition_reject_total", {})
     for reason, value in transition_reject.items():
@@ -865,6 +1000,127 @@ async def register_camera(body: CameraRegister, _claims: dict = Depends(require_
     return {"ok": True, "camera_id": body.camera_id}
 
 
+@app.post("/api/auth/register")
+async def auth_register(body: AuthRegisterIn) -> dict:
+    created = auth_store.create_user_account(body.email, body.password, body.display_name)
+    return {"ok": True, **created}
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: AuthLoginIn, user_agent: str | None = Query(default=None), ip: str | None = Query(default=None)) -> dict:
+    auth = auth_store.authenticate_user(body.email, body.password)
+    if not auth.get("auth_ok"):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user = auth["user"]
+    roles = list(auth.get("roles", []))
+    session_id = f"sess-{user['id']}-{int(time.time())}"
+    access = issue_access_token(int(user["id"]), roles, session_id, int(settings.access_token_ttl_sec))
+    refresh = auth_store.issue_refresh_token(
+        int(user["id"]),
+        session_id,
+        int(settings.refresh_token_ttl_sec),
+        {"ip": ip or "", "user_agent": user_agent or ""},
+    )
+    return {
+        "ok": True,
+        "user": user,
+        "roles": roles,
+        "access_token": access["jwt_access_token"],
+        "access_exp": access["exp_ts"],
+        "refresh_token": refresh["refresh_token"],
+        "refresh_exp": int(refresh["expires_at"]),
+        "session_id": session_id,
+    }
+
+
+@app.post("/api/auth/refresh")
+async def auth_refresh(body: AuthRefreshIn, user_agent: str | None = Query(default=None), ip: str | None = Query(default=None)) -> dict:
+    rotated = auth_store.rotate_refresh_token(
+        body.refresh_token,
+        int(settings.refresh_token_ttl_sec),
+        {"ip": ip or "", "user_agent": user_agent or ""},
+    )
+    if not rotated.get("ok"):
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    user_id = int(rotated["user_id"])
+    user_roles = auth_store.get_user_and_roles(user_id)
+    if user_roles is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    if str(user_roles["user"].get("status", "")).lower() != "active":
+        raise HTTPException(status_code=403, detail="User blocked")
+    roles = list(user_roles.get("roles", [])) or [settings.operator_role_name]
+    access = issue_access_token(user_id, roles, str(rotated["session_id"]), int(settings.access_token_ttl_sec))
+    return {
+        "ok": True,
+        "access_token": access["jwt_access_token"],
+        "access_exp": access["exp_ts"],
+        "refresh_token": rotated["refresh_token"],
+        "refresh_exp": int(rotated["expires_at"]),
+        "session_id": rotated["session_id"],
+    }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(body: AuthLogoutIn, claims: dict = Depends(require_auth_roles(set()))) -> dict:
+    ok = auth_store.revoke_refresh_token(body.refresh_token)
+    session_id = str(claims.get("session_id", "") or "")
+    revoked_session_tokens = auth_store.revoke_session_tokens(session_id) if session_id else 0
+    jti = str(claims.get("jti", "") or "")
+    if jti:
+        revoke_jti(jti)
+    return {"ok": bool(ok), "revoked_session_tokens": int(revoked_session_tokens)}
+
+
+@app.get("/api/auth/me")
+async def auth_me(claims: dict = Depends(require_auth_roles(set()))) -> dict:
+    return {"ok": True, "claims": claims}
+
+
+@app.post("/api/auth/users/{user_id}/status")
+async def auth_set_user_status(
+    user_id: int,
+    status: str = Query(...),
+    _claims: dict = Depends(require_auth_roles({settings.admin_role_name})),
+) -> dict:
+    ok = auth_store.set_user_status(int(user_id), status)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid user status")
+    return {"ok": True, "user_id": int(user_id), "status": status}
+
+
+@app.post("/api/auth/users/{user_id}/roles")
+async def auth_assign_role(
+    user_id: int,
+    role: str = Query(...),
+    _claims: dict = Depends(require_auth_roles({settings.admin_role_name})),
+) -> dict:
+    ok = auth_store.assign_role(int(user_id), role)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    return {"ok": True, "user_id": int(user_id), "role": role}
+
+
+@app.post("/api/games/{game_id}/cameras/bind")
+async def bind_camera_session(game_id: str, body: CameraBindIn, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    session = CameraSessionState(
+        game_id=game_id,
+        camera_id=body.camera_id,
+        camera_type=body.camera_type,
+        seat_hint=body.seat_hint,
+        device_label=body.device_label,
+        stream_profile=body.stream_profile,
+        camera_online=False,
+    )
+    camera_sessions[game_id][body.camera_id] = session
+    return {"ok": True, "camera_session": session.model_dump()}
+
+
+@app.get("/api/games/{game_id}/cameras")
+async def list_camera_sessions(game_id: str, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    rows = [s.model_dump() for s in camera_sessions.get(game_id, {}).values()]
+    return {"ok": True, "game_id": game_id, "count": len(rows), "camera_sessions": rows}
+
+
 @app.post("/api/frames")
 async def ingest_frame(body: FrameIn, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
     camera_key = f"camera:{body.camera_id}"
@@ -878,11 +1134,19 @@ async def ingest_frame(body: FrameIn, _claims: dict = Depends(require_auth_roles
     if not _ingest_allowed(body.camera_id, int(body.ts_ms)):
         raise HTTPException(status_code=429, detail="Frame ingest rate limit exceeded for camera")
 
+    _require_bound_camera(body.game_id, body.camera_id, body.camera_type)
+
+    _touch_camera_session(body.game_id, body.camera_id, int(body.ts_ms))
+
     payload = {
         "game_id": body.game_id,
         "camera_id": body.camera_id,
         "camera_type": body.camera_type,
         "frame_id": body.frame_id or f"{body.camera_id}:{body.ts_ms}",
+        "target_model_type": body.target_model_type or body.camera_type,
+        "device_id": body.device_id or "",
+        "session_id": body.session_id or "",
+        "routing_key": select_worker_route(body.camera_type, body.target_model_type),
         "ts_ms": str(body.ts_ms),
         "frame_b64": body.frame_b64,
     }
@@ -902,6 +1166,7 @@ async def ingest_frame_batch(body: FrameBatchIn, _claims: dict = Depends(require
         camera_key = f"camera:{frame.camera_id}"
         if not await redis_client.exists(camera_key):
             raise HTTPException(status_code=404, detail=f"Camera not registered: {frame.camera_id}")
+        _require_bound_camera(frame.game_id, frame.camera_id, frame.camera_type)
 
     queue_depth = int(await redis_client.xlen(settings.frame_stream))
     if queue_depth >= int(settings.max_queue_len):
@@ -911,11 +1176,16 @@ async def ingest_frame_batch(body: FrameBatchIn, _claims: dict = Depends(require
     for frame in body.frames:
         if not _ingest_allowed(frame.camera_id, int(frame.ts_ms)):
             continue
+        _touch_camera_session(frame.game_id, frame.camera_id, int(frame.ts_ms))
         payload = {
             "game_id": frame.game_id,
             "camera_id": frame.camera_id,
             "camera_type": frame.camera_type,
             "frame_id": frame.frame_id or f"{frame.camera_id}:{frame.ts_ms}",
+            "target_model_type": frame.target_model_type or frame.camera_type,
+            "device_id": frame.device_id or "",
+            "session_id": frame.session_id or "",
+            "routing_key": select_worker_route(frame.camera_type, frame.target_model_type),
             "ts_ms": str(frame.ts_ms),
             "frame_b64": frame.frame_b64,
         }
@@ -965,6 +1235,9 @@ async def start_game(body: GameStartIn, _claims: dict = Depends(require_auth_rol
         must_follow_suit=body.must_follow_suit,
         trump_mode=body.trump_mode,
         variant_name=body.variant_name,
+        seat_order=body.seat_order,
+        play_direction=body.play_direction,
+        trick_size=body.trick_size,
         must_trump_if_void=body.must_trump_if_void,
         trump_suit=body.trump_suit,
         rank_order_map=body.rank_order_map,
@@ -974,7 +1247,46 @@ async def start_game(body: GameStartIn, _claims: dict = Depends(require_auth_rol
             event_store.log_game_config(body.game_id, int(time.time() * 1000), body.model_dump())
         except Exception:
             pass
-    return {"ok": True, "state": state.model_dump()}
+    # Initialize v2 match engine state in parallel with canonical reducer state
+    try:
+        from .models import VariantConfig
+
+        variant = VariantConfig(
+            variant_id=body.variant_name,
+            player_count=body.player_count,
+            seat_order=body.seat_order,
+            play_direction=body.play_direction,
+            trick_size=body.trick_size,
+            rounds_total=body.rounds_total,
+            target_points=body.target_points,
+            must_follow_suit=body.must_follow_suit,
+            must_trump_if_void=body.must_trump_if_void,
+            trump_suit=body.trump_suit,
+            rank_order_map=body.rank_order_map or state.rules.rank_order_map,
+            team_map=body.team_map,
+        )
+        match_state = match_engine.start_match(body.game_id, variant, body.to_play)
+    except Exception:
+        match_state = None
+    return {"ok": True, "state": state.model_dump(), "match_state": match_state.model_dump() if match_state else None}
+
+
+@app.post("/api/games/{game_id}/variant")
+async def set_game_variant(game_id: str, body: VariantSetIn, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    out = match_engine.set_variant_config(game_id, body.variant)
+    return {"ok": True, **out}
+
+
+@app.post("/api/games/{game_id}/round/start")
+async def start_game_round(game_id: str, body: RoundStartIn, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    state = match_engine.start_round(game_id, body)
+    return {"ok": True, "match_state": state.model_dump()}
+
+
+@app.post("/api/games/{game_id}/round/end")
+async def end_game_round(game_id: str, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    state = match_engine.end_round(game_id)
+    return {"ok": True, "match_state": state.model_dump()}
 
 
 @app.post("/api/games/{game_id}/config")
@@ -982,6 +1294,9 @@ async def config_game(game_id: str, body: GameConfigIn, _claims: dict = Depends(
     state = game_state_engine.configure(
         game_id,
         variant_name=body.variant_name,
+        seat_order=body.seat_order,
+        play_direction=body.play_direction,
+        trick_size=body.trick_size,
         leader=body.leader,
         to_play=body.to_play,
         lead_suit=body.lead_suit,
@@ -1096,6 +1411,35 @@ async def game_diagnostics(game_id: str) -> dict:
         "recommendation_metrics": recommendation_metrics,
         "belief_metrics": belief_diagnostics(belief),
         "calibration": fusion_engine.get_table_calibration(game_id),
+        "camera_sessions": [s.model_dump() for s in camera_sessions.get(game_id, {}).values()],
+        "card_lifecycle_summary": {
+            "tracked_cards": len((match_engine.get(game_id).card_lifecycle if match_engine.get(game_id) else {})),
+        },
+        "rule_violations_recent": [],
+        "transition_latency_ms": storage_metrics,
+    }
+
+
+@app.get("/api/games/{game_id}/setup/diagnostics")
+async def game_setup_diagnostics(game_id: str, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    sessions = [s.model_dump() for s in camera_sessions.get(game_id, {}).values()]
+    now = int(time.time() * 1000)
+    stale = [
+        row
+        for row in sessions
+        if int(row.get("last_frame_ts_ms", 0) or 0) > 0
+        and (now - int(row.get("last_frame_ts_ms", 0))) > int(settings.camera_stale_threshold_ms)
+    ]
+    readiness = "ready" if len(sessions) >= 2 and not stale else "degraded"
+    return {
+        "ok": True,
+        "game_id": game_id,
+        "readiness": readiness,
+        "required_camera_count": 2,
+        "bound_camera_count": len(sessions),
+        "stale_camera_count": len(stale),
+        "stale_camera_ids": [s.get("camera_id", "") for s in stale],
+        "camera_sessions": sessions,
     }
 
 

@@ -2,6 +2,12 @@
 
 This repository now includes a working distributed backend/frontend stack for real-time card detection, with a Thulla hand-view mode.
 
+## M2 execution planning
+
+- Sprint board (deployable increments): `M2_SPRINT_BOARD.md`
+- Jira-style backlog with dependencies: `M2_JIRA_BACKLOG.md`
+- Master completion checklist: `IMPLEMENTATION_CHECKLIST.md`
+
 ## What is implemented
 
 - FastAPI backend with:

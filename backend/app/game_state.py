@@ -43,8 +43,9 @@ class GameStateEngine:
         }
 
     @staticmethod
-    def _seat_order() -> list[str]:
-        return ["me", "left", "across", "right"]
+    def _seat_order_from_state(state: CanonicalGameState) -> list[str]:
+        seats = [s for s in (state.rules.seat_order or []) if s]
+        return seats or ["me", "left", "across", "right"]
 
     @staticmethod
     def _rank_value(card: str, rank_order_map: dict[str, int] | None = None) -> int:
@@ -66,12 +67,13 @@ class GameStateEngine:
         }
         return order.get(rank, 0)
 
-    def _next_player(self, current: str) -> str:
-        seats = self._seat_order()
+    def _next_player(self, state: CanonicalGameState, current: str) -> str:
+        seats = self._seat_order_from_state(state)
         if current not in seats:
             return seats[0]
         idx = seats.index(current)
-        return seats[(idx + 1) % len(seats)]
+        step = 1 if str(state.rules.play_direction or "clockwise") == "clockwise" else -1
+        return seats[(idx + step) % len(seats)]
 
     def _resolve_trick_winner(self, cards: list[TableTrickCard], lead_suit: str, trump_suit: str, rank_order_map: dict[str, int]) -> str:
         lead = (lead_suit or "").upper()
@@ -94,6 +96,9 @@ class GameStateEngine:
         must_follow_suit: bool,
         trump_mode: str,
         variant_name: str = "default",
+        seat_order: list[str] | None = None,
+        play_direction: str = "clockwise",
+        trick_size: int = 4,
         must_trump_if_void: bool = False,
         trump_suit: str = "",
         rank_order_map: dict[str, int] | None = None,
@@ -104,6 +109,9 @@ class GameStateEngine:
             turn=TurnState(leader=leader, to_play=to_play, lead_suit=""),
             rules=GameRules(
                 variant_name=variant_name,
+                seat_order=seat_order or ["me", "left", "across", "right"],
+                play_direction=play_direction if play_direction in {"clockwise", "counterclockwise"} else "clockwise",
+                trick_size=max(1, int(trick_size or 4)),
                 must_follow_suit=must_follow_suit,
                 must_trump_if_void=must_trump_if_void,
                 trump_mode=trump_mode,
@@ -166,6 +174,13 @@ class GameStateEngine:
             state.rules.trump_suit = str(kwargs["trump_suit"])
         if kwargs.get("variant_name") is not None:
             state.rules.variant_name = str(kwargs["variant_name"])
+        if kwargs.get("seat_order") is not None and isinstance(kwargs["seat_order"], list):
+            state.rules.seat_order = [str(s) for s in kwargs["seat_order"] if str(s)]
+        if kwargs.get("play_direction") is not None:
+            direction = str(kwargs["play_direction"])
+            state.rules.play_direction = direction if direction in {"clockwise", "counterclockwise"} else "clockwise"
+        if kwargs.get("trick_size") is not None:
+            state.rules.trick_size = max(1, int(kwargs["trick_size"]))
         if kwargs.get("rank_order_map") is not None and isinstance(kwargs["rank_order_map"], dict):
             state.rules.rank_order_map = dict(kwargs["rank_order_map"])
         state.state_version += 1
@@ -187,7 +202,7 @@ class GameStateEngine:
             for card in (next_hand | next_table)
             if str(lifecycle.get(card, {}).get("state", "")).startswith("WON_PILE")
         ]
-        if won_pile_reappearance:
+        if won_pile_reappearance and not bool(settings.allow_won_pile_replay):
             score *= 0.2
             notes.append("Rejected/penalized won-pile card reappearance")
             reason_code = "won_pile_reappeared"
@@ -261,7 +276,7 @@ class GameStateEngine:
             self._mark_card_state(game_id, item.card, "PLAYED_ON_TABLE", ts_ms, seat=item.seat)
 
         # append history when table has cards and then clears (simple trick-close heuristic)
-        if len(state.table_trick_cards) >= 4:
+        if len(state.table_trick_cards) >= max(1, int(state.rules.trick_size or 4)):
             trick_no = (len(state.played_history) // 4) + 1
             for t in state.table_trick_cards:
                 state.played_history.append(PlayedHistoryItem(trick_no=trick_no, seat=t.seat, card=t.card))
@@ -292,7 +307,7 @@ class GameStateEngine:
             state.turn.lead_suit = c[-1] if c else ""
             expected_to_play = state.turn.leader
             for _ in range(len(state.table_trick_cards)):
-                expected_to_play = self._next_player(expected_to_play)
+                expected_to_play = self._next_player(state, expected_to_play)
             state.turn.to_play = expected_to_play
 
         unc = fused.get("uncertainty", {})

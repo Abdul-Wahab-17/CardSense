@@ -40,7 +40,11 @@ class Settings(BaseSettings):
     auth_enabled: int = 1
     jwt_issuer: str = ""
     jwt_audience: str = ""
+    jwt_private_key_pem: str = ""
     jwt_public_key_pem: str = ""
+    jwt_hs256_secret: str = "dev-secret-change-me"
+    access_token_ttl_sec: int = 1800
+    refresh_token_ttl_sec: int = 2592000
     api_key_hashes: str = ""
     admin_role_name: str = "admin"
     operator_role_name: str = "operator"
@@ -68,6 +72,13 @@ class Settings(BaseSettings):
     frame_ingest_rate_limit_fps: float = 8.0
     ws_broadcast_batch_size: int = 64
 
+    # Vision-state bridge / reconciliation
+    hand_occlusion_ttl_ms: int = 2000
+    table_occlusion_ttl_ms: int = 1200
+    hand_to_table_grace_ms: int = 1200
+    max_transition_gap_ms: int = 3000
+    max_table_growth_per_event: int = 1
+
     # Deployment and release
     deploy_env: str = "dev"
     release_version: str = "dev-local"
@@ -80,7 +91,28 @@ class Settings(BaseSettings):
     feature_belief_bayes_update: int = 1
     feature_db_event_persistence: int = 1
     feature_replay_api: int = 1
+    feature_enforce_camera_binding: int = 1
     persist_recommendation_on_transition: int = 1
+
+    # Reconciliation safety
+    allow_won_pile_replay: int = 0
+
+    # Auth hardening
+    auth_strict_iss_aud: int = 1
+    auth_enforce_jti: int = 1
+    auth_prod_secret_required: int = 1
+
+    # Camera readiness / stale gating
+    camera_stale_threshold_ms: int = 5000
+
+    # Multi-machine model registry
+    model_provider: str = "filesystem"  # filesystem|http|s3
+    model_ref_hand: str = ""
+    model_ref_table: str = ""
+    model_registry_url: str = ""
+    model_registry_token: str = ""
+    model_sha256_hand: str = ""
+    model_sha256_table: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

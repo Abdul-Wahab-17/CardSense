@@ -1,50 +1,106 @@
 groups:
   - name: cardsense
-    rules:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+echo "Next step: redeploy backend and verify /api/features + alert baseline"echo "Set CANARY_PERCENT=${TARGET_PERCENT} in ${ENV_FILE}"fi  printf "\nCANARY_PERCENT=%s\n" "$TARGET_PERCENT" >> "$ENV_FILE"else  sed -i "s/^CANARY_PERCENT=.*/CANARY_PERCENT=${TARGET_PERCENT}/" "$ENV_FILE"if grep -q '^CANARY_PERCENT=' "$ENV_FILE"; thenfi  exit 1  echo ".env not found; create it from .env.example first"if [ ! -f "$ENV_FILE" ]; thenENV_FILE=".env"fi  exit 1  echo "canary percent must be between 0 and 100"if [ "$TARGET_PERCENT" -lt 0 ] || [ "$TARGET_PERCENT" -gt 100 ]; thenTARGET_PERCENT="${1:-10}"# Usage: ./scripts/canary_rollout.sh [percent]    rules:
       - alert: RecommendationLatencyP95High
         expr: cardsense_recommendation_latency_ms_bucket{le="300"} < 1
         for: 10m
         labels:
           severity: warning
+          runbook: RUNBOOK_WORKER_DEGRADATION.md
         annotations:
           summary: Recommendation latency p95 > 300ms
+          runbook_url: RUNBOOK_WORKER_DEGRADATION.md
 
       - alert: TransitionRejectRateHigh
         expr: sum(cardsense_transition_reject_total) > 0
         for: 15m
         labels:
           severity: warning
+          runbook: RUNBOOK_TRANSITION_REJECT_SPIKE.md
         annotations:
           summary: Transition reject rate elevated
+          runbook_url: RUNBOOK_TRANSITION_REJECT_SPIKE.md
 
       - alert: WorkerErrorsHigh
         expr: cardsense_worker_skipped_out_of_order_total > 100
         for: 10m
         labels:
           severity: warning
+          runbook: RUNBOOK_WORKER_DEGRADATION.md
         annotations:
           summary: Worker out-of-order skips elevated
+          runbook_url: RUNBOOK_WORKER_DEGRADATION.md
 
       - alert: QueueDepthGrowing
         expr: cardsense_queue_depth_frames > 5000
         for: 10m
         labels:
           severity: critical
+          runbook: RUNBOOK_QUEUE_BACKLOG.md
         annotations:
           summary: Frame queue depth growing
+          runbook_url: RUNBOOK_QUEUE_BACKLOG.md
+
+      - alert: QueueLagRatioHigh
+        expr: cardsense_queue_lag_ratio > 0.7
+        for: 10m
+        labels:
+          severity: critical
+          runbook: RUNBOOK_QUEUE_BACKLOG.md
+        annotations:
+          summary: Queue lag ratio exceeded 70%
+          runbook_url: RUNBOOK_QUEUE_BACKLOG.md
+
+      - alert: StaleCameraRateHigh
+        expr: cardsense_stale_camera_rate > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          runbook: RUNBOOK_REPLAY_DEBUG.md
+        annotations:
+          summary: Stale camera rate elevated
+          runbook_url: RUNBOOK_REPLAY_DEBUG.md
 
       - alert: WebsocketClientDrop
         expr: cardsense_ws_connected_clients < 1
         for: 5m
         labels:
           severity: warning
+          runbook: RUNBOOK_WORKER_DEGRADATION.md
         annotations:
           summary: WebSocket clients dropped
+          runbook_url: RUNBOOK_WORKER_DEGRADATION.md
 
       - alert: DBWriteLatencyHigh
         expr: max(cardsense_db_write_latency_ms) > 250
         for: 10m
         labels:
           severity: warning
+          runbook: RUNBOOK_DB_LATENCY_SPIKE.md
         annotations:
           summary: DB write latency high
+          runbook_url: RUNBOOK_DB_LATENCY_SPIKE.md

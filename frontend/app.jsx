@@ -60,12 +60,18 @@ function App() {
   const [recommendation, setRecommendation] = useState(null);
   const [gameState, setGameState] = useState(null);
   const [gameDiagnostics, setGameDiagnostics] = useState(null);
+  const [setupDiagnostics, setSetupDiagnostics] = useState(null);
   const [beliefView, setBeliefView] = useState(null);
   const [simulationDebug, setSimulationDebug] = useState(null);
   const [mustFollowSuit, setMustFollowSuit] = useState(true);
   const [mustTrumpIfVoid, setMustTrumpIfVoid] = useState(false);
   const [trumpSuit, setTrumpSuit] = useState("");
   const [calibrationJson, setCalibrationJson] = useState('{"seat_regions":{"left":[[0,0],[320,720]],"across":[[321,0],[640,720]],"right":[[641,0],[960,720]],"me":[[961,0],[1280,720]]},"trick_region":[[300,220],[980,560]],"won_pile_regions":{"team_me":[[0,560],[640,720]],"team_opp":[[640,560],[1280,720]]},"table_homography":[],"occlusion_timeout_ms":2000}');
+  const [email, setEmail] = useState(localStorage.getItem("cardsense_email") || "");
+  const [password, setPassword] = useState("");
+  const [accessToken, setAccessToken] = useState(localStorage.getItem("cardsense_access_token") || "");
+  const [refreshToken, setRefreshToken] = useState(localStorage.getItem("cardsense_refresh_token") || "");
+  const [sessionId, setSessionId] = useState(localStorage.getItem("cardsense_session_id") || "");
 
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -126,7 +132,57 @@ function App() {
     : null;
 
   async function apiFetch(url, options = {}) {
-    return fetch(url, options);
+    const headers = { ...(options.headers || {}) };
+    if (accessToken) {
+      headers.Authorization = `Bearer ${accessToken}`;
+    }
+    return fetch(url, { ...options, headers });
+  }
+
+  async function login() {
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const payload = await res.json();
+      const access = payload.access_token || "";
+      const refresh = payload.refresh_token || "";
+      const sess = payload.session_id || "";
+      setAccessToken(access);
+      setRefreshToken(refresh);
+      setSessionId(sess);
+      localStorage.setItem("cardsense_email", email.trim());
+      localStorage.setItem("cardsense_access_token", access);
+      localStorage.setItem("cardsense_refresh_token", refresh);
+      localStorage.setItem("cardsense_session_id", sess);
+      setPassword("");
+      setRegisterStatus("Authenticated");
+    } catch (err) {
+      setRegisterStatus(`Login failed: ${err}`);
+    }
+  }
+
+  async function logout() {
+    try {
+      if (refreshToken) {
+        await apiFetch("/api/auth/logout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+      }
+    } finally {
+      setAccessToken("");
+      setRefreshToken("");
+      setSessionId("");
+      localStorage.removeItem("cardsense_access_token");
+      localStorage.removeItem("cardsense_refresh_token");
+      localStorage.removeItem("cardsense_session_id");
+      setRegisterStatus("Logged out");
+    }
   }
 
   async function registerCamera(event) {
@@ -138,7 +194,20 @@ function App() {
         body: JSON.stringify({ camera_id: cameraId.trim(), source: cameraSource.trim() }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setRegisterStatus(`Registered ${cameraId.trim()}`);
+      const gid = gameId.trim() || "default-game";
+      const bindRes = await apiFetch(`/api/games/${encodeURIComponent(gid)}/cameras/bind`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          camera_id: cameraId.trim(),
+          camera_type: cameraType,
+          seat_hint: cameraType === "table" ? "left" : "me",
+          device_label: cameraSource.trim() || "browser",
+          stream_profile: "balanced",
+        }),
+      });
+      if (!bindRes.ok) throw new Error(await bindRes.text());
+      setRegisterStatus(`Registered and bound ${cameraId.trim()}`);
     } catch (err) {
       setRegisterStatus(`Registration failed: ${err}`);
     }
@@ -185,7 +254,8 @@ function App() {
     loadInitialData();
 
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${location.host}/ws/detections`);
+    const tokenParam = accessToken ? `?token=${encodeURIComponent(accessToken)}` : "";
+    const ws = new WebSocket(`${protocol}://${location.host}/ws/detections${tokenParam}`);
 
     ws.onmessage = (msg) => {
       try {
@@ -218,7 +288,7 @@ function App() {
       ws.close();
       stopWebcamStream();
     };
-  }, []);
+  }, [accessToken]);
 
   useEffect(() => {
     let timer = null;
@@ -243,10 +313,11 @@ function App() {
     const loadRecommendation = async () => {
       const gid = gameId.trim() || "default-game";
       try {
-        const [recRes, stateRes, diagRes, beliefRes, simRes] = await Promise.all([
+        const [recRes, stateRes, diagRes, setupRes, beliefRes, simRes] = await Promise.all([
           apiFetch(`/api/games/${encodeURIComponent(gid)}/recommendation`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/state`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/diagnostics`),
+          apiFetch(`/api/games/${encodeURIComponent(gid)}/setup/diagnostics`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/belief`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/simulation/debug?simulation_seed=1337&rollout_count=96`),
         ]);
@@ -256,6 +327,7 @@ function App() {
           setGameState(gs.state || null);
         }
         if (diagRes.ok) setGameDiagnostics(await diagRes.json());
+        if (setupRes.ok) setSetupDiagnostics(await setupRes.json());
         if (beliefRes.ok) setBeliefView(await beliefRes.json());
         if (simRes.ok) setSimulationDebug(await simRes.json());
       } catch (_) {}
@@ -339,6 +411,9 @@ function App() {
           game_id: gameId.trim() || "default-game",
           camera_id: id,
           camera_type: cameraType,
+          target_model_type: cameraType,
+          device_id: id,
+          session_id: sessionId || `sess-${id}`,
           frame_id: `${id}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
           frame_b64: frameB64,
           ts_ms: Date.now(),
@@ -514,6 +589,20 @@ function App() {
         <aside className="control-rail">
           <section className="panel">
             <h2 className="panel-title">Camera & Stream</h2>
+            <div className="form-grid">
+              <label className="field">
+                <span>Email</span>
+                <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+              </label>
+              <label className="field">
+                <span>Password</span>
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" />
+              </label>
+            </div>
+            <div className="button-row">
+              <button className="btn btn-secondary" type="button" onClick={login}>Login</button>
+              <button className="btn btn-secondary" type="button" onClick={logout}>Logout</button>
+            </div>
             <form className="form-grid" onSubmit={registerCamera}>
               <label className="field">
                 <span>Game ID</span>
@@ -623,6 +712,7 @@ function App() {
             <details className="sub-debug">
               <summary>Advanced Diagnostics</summary>
               <pre>{JSON.stringify({ debugInfo, handDebug, gameDiagnostics }, null, 2)}</pre>
+              <pre>{JSON.stringify({ setupDiagnostics }, null, 2)}</pre>
               <pre>{JSON.stringify({ beliefDiagnostics: beliefView?.diagnostics || {}, simulationTop: (simulationDebug?.action_scores || []).slice(0, 5) }, null, 2)}</pre>
             </details>
           </details>
