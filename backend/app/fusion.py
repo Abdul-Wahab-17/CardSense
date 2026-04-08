@@ -86,11 +86,99 @@ class FusionEngine:
         self._calibration: Dict[str, dict] = defaultdict(dict)
         self._occluded_tracks: Dict[tuple[str, str], Dict[int, int]] = defaultdict(dict)
         self.occlusion_timeout_ms = 2000
+        self.hand_to_table_grace_ms = 1200
+        self._card_location_state: Dict[str, Dict[str, dict]] = defaultdict(dict)
+
+    def _prune_card_location_state(self, game_id: str, ts_ms: int) -> None:
+        per_game = self._card_location_state.get(game_id, {})
+        if not per_game:
+            return
+        ttl_ms = int(max(self.track_stale_ms, self.hand_to_table_grace_ms) + self.occlusion_timeout_ms)
+        stale_cards: list[str] = []
+        for card, state in per_game.items():
+            last_seen = int(max(state.get("last_hand_seen_ts", 0), state.get("last_table_seen_ts", 0)))
+            if last_seen > 0 and (ts_ms - last_seen) > ttl_ms:
+                stale_cards.append(card)
+        for card in stale_cards:
+            per_game.pop(card, None)
+        if not per_game and game_id in self._card_location_state:
+            self._card_location_state.pop(game_id, None)
 
     def set_table_calibration(self, game_id: str, calibration: dict) -> None:
         self._calibration[game_id] = dict(calibration)
         if calibration.get("occlusion_timeout_ms") is not None:
             self.occlusion_timeout_ms = int(calibration.get("occlusion_timeout_ms") or self.occlusion_timeout_ms)
+
+    def _resolve_card_location(
+        self,
+        game_id: str,
+        card: str,
+        in_hand: bool,
+        in_table: bool,
+        hand_conf: float,
+        table_conf: float,
+        ts_ms: int,
+        hand_item: dict | None = None,
+        table_item: dict | None = None,
+    ) -> str:
+        per_game = self._card_location_state[game_id]
+        state = per_game.setdefault(
+            card,
+            {
+                "location": "unknown",
+                "pending": "",
+                "grace_until_ts": 0,
+                "last_hand_seen_ts": 0,
+                "last_table_seen_ts": 0,
+                "last_hand_item": {},
+                "last_table_item": {},
+            },
+        )
+
+        if in_hand:
+            state["last_hand_seen_ts"] = ts_ms
+            if isinstance(hand_item, dict):
+                state["last_hand_item"] = dict(hand_item)
+        if in_table:
+            state["last_table_seen_ts"] = ts_ms
+            if isinstance(table_item, dict):
+                state["last_table_item"] = dict(table_item)
+
+        location = str(state.get("location", "unknown"))
+        grace_until = int(state.get("grace_until_ts", 0) or 0)
+
+        if in_hand and in_table:
+            # Deterministic hand->table transfer: once table sees a card that was in hand,
+            # table owns it and hand is suppressed during the grace window.
+            if location == "hand":
+                state["pending"] = "hand_to_table"
+                state["grace_until_ts"] = ts_ms + int(self.hand_to_table_grace_ms)
+                state["location"] = "table"
+                return "table"
+            if location == "table":
+                return "table"
+            chosen = "table" if table_conf >= hand_conf else "hand"
+            state["location"] = chosen
+            if chosen == "table":
+                state["pending"] = "hand_to_table"
+                state["grace_until_ts"] = ts_ms + int(self.hand_to_table_grace_ms)
+            return chosen
+
+        if in_table and not in_hand:
+            state["location"] = "table"
+            state["pending"] = ""
+            state["grace_until_ts"] = 0
+            return "table"
+
+        if in_hand and not in_table:
+            if location == "table" and ts_ms <= grace_until:
+                return "table"
+            state["location"] = "hand"
+            state["pending"] = ""
+            state["grace_until_ts"] = 0
+            return "hand"
+
+        return location
 
     def get_table_calibration(self, game_id: str) -> dict:
         return dict(self._calibration.get(game_id, {}))
@@ -335,22 +423,59 @@ class FusionEngine:
         return table, mean_conf
 
     def snapshot(self, game_id: str, ts_ms: int) -> dict:
+        self._prune_card_location_state(game_id, ts_ms)
         hand_cards, hand_conf = self._as_hand(game_id)
         table_cards, table_conf = self._as_table(game_id)
 
-        # cross-camera uniqueness: keep location with higher confidence
+        # cross-camera uniqueness with per-card transfer state machine
         conflicts = []
         hand_map = {c["label"]: c for c in hand_cards}
         table_map = {c["card"]: c for c in table_cards}
-        for card in list(set(hand_map.keys()) & set(table_map.keys())):
-            h = hand_map[card]
-            t = table_map[card]
-            if h["confidence"] >= t["confidence"]:
-                table_cards = [x for x in table_cards if x["card"] != card]
-                conflicts.append({"card": card, "kept": "hand", "dropped": "table"})
-            else:
-                hand_cards = [x for x in hand_cards if x["label"] != card]
-                conflicts.append({"card": card, "kept": "table", "dropped": "hand"})
+        keep_in_hand: set[str] = set()
+        keep_on_table: set[str] = set()
+        for card in set(hand_map.keys()) | set(table_map.keys()):
+            h = hand_map.get(card)
+            t = table_map.get(card)
+            keep = self._resolve_card_location(
+                game_id=game_id,
+                card=card,
+                in_hand=h is not None,
+                in_table=t is not None,
+                hand_conf=float((h or {}).get("confidence", 0.0)),
+                table_conf=float((t or {}).get("confidence", 0.0)),
+                ts_ms=ts_ms,
+                hand_item=h,
+                table_item=t,
+            )
+            if keep == "table" and t is not None:
+                keep_on_table.add(card)
+            elif keep == "hand" and h is not None:
+                keep_in_hand.add(card)
+
+            if h is not None and t is not None:
+                dropped = "table" if keep == "hand" else "hand"
+                conflicts.append({"card": card, "kept": keep, "dropped": dropped})
+
+        hand_cards = [x for x in hand_cards if x.get("label", "") in keep_in_hand]
+        table_cards = [x for x in table_cards if x.get("card", "") in keep_on_table]
+
+        # Preserve deterministic hand->table transfer during grace even if table camera briefly misses.
+        for card in keep_on_table:
+            if any(item.get("card", "") == card for item in table_cards):
+                continue
+            state = self._card_location_state.get(game_id, {}).get(card, {})
+            last_table_item = state.get("last_table_item", {}) if isinstance(state, dict) else {}
+            if not isinstance(last_table_item, dict) or not last_table_item.get("card"):
+                continue
+            projected = dict(last_table_item)
+            hand_item = hand_map.get(card, {})
+            projected_conf = max(
+                float(projected.get("confidence", 0.0)) * 0.85,
+                float(hand_item.get("confidence", 0.0)) * 0.70,
+            )
+            projected["confidence"] = round(projected_conf, 4)
+            projected["state"] = "projected"
+            table_cards.append(projected)
 
         # deck-count guardrail: each label max 1 in final snapshot
         dedup_hand: list[dict] = []
@@ -422,6 +547,7 @@ class FusionEngine:
                 "track_count_table": len(self._tracks.get((game_id, "table"), [])),
                 "avg_track_stability": round(avg_stability, 4),
                 "posterior_entropy_threshold": round(self.posterior_entropy_threshold, 4),
+                "hand_to_table_grace_ms": int(self.hand_to_table_grace_ms),
                 "occluded_tracks": occluded_ids,
             },
         }

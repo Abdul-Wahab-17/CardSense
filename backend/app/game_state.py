@@ -19,11 +19,27 @@ class TransitionResult:
 class GameStateEngine:
     def __init__(self) -> None:
         self._states: Dict[str, CanonicalGameState] = {}
+        self._card_lifecycle: Dict[str, Dict[str, dict]] = {}
         self._metrics = {
             "transitions_total": 0,
             "transitions_rejected": 0,
             "illegal_transition_rejects": 0,
             "transition_reject_reason_code": {},
+        }
+
+    def _ensure_lifecycle(self, game_id: str) -> Dict[str, dict]:
+        if game_id not in self._card_lifecycle:
+            self._card_lifecycle[game_id] = {}
+        return self._card_lifecycle[game_id]
+
+    def _mark_card_state(self, game_id: str, card: str, state: str, ts_ms: int, seat: str = "") -> None:
+        if not card:
+            return
+        lifecycle = self._ensure_lifecycle(game_id)
+        lifecycle[card] = {
+            "state": state,
+            "updated_ts_ms": int(ts_ms),
+            "seat": seat,
         }
 
     @staticmethod
@@ -102,6 +118,7 @@ class GameStateEngine:
             updated_ts_ms=now,
         )
         self._states[game_id] = state
+        self._card_lifecycle[game_id] = {}
         return state
 
     def get(self, game_id: str) -> CanonicalGameState:
@@ -121,9 +138,11 @@ class GameStateEngine:
             updated_ts_ms=now,
         )
         self._states[game_id] = state
+        self._card_lifecycle[game_id] = {}
         return state
 
     def end(self, game_id: str) -> bool:
+        self._card_lifecycle.pop(game_id, None)
         return self._states.pop(game_id, None) is not None
 
     def all_states(self) -> list[CanonicalGameState]:
@@ -162,6 +181,18 @@ class GameStateEngine:
         prev_table = {item.card for item in prev.table_trick_cards}
         next_table = {item["card"] for item in table_cards}
 
+        lifecycle = self._card_lifecycle.get(prev.game_id, {})
+        won_pile_reappearance = [
+            card
+            for card in (next_hand | next_table)
+            if str(lifecycle.get(card, {}).get("state", "")).startswith("WON_PILE")
+        ]
+        if won_pile_reappearance:
+            score *= 0.2
+            notes.append("Rejected/penalized won-pile card reappearance")
+            reason_code = "won_pile_reappeared"
+            reason_detail = "card from won pile appeared again"
+
         # legal: hand -> table on turn
         moved_to_table = [card for card in next_table if card in prev_hand and card not in prev_table]
         if moved_to_table and not prev.turn.to_play:
@@ -191,6 +222,7 @@ class GameStateEngine:
         self._metrics["transitions_total"] += 1
         game_id = fused["game_id"]
         state = self.get(game_id)
+        ts_ms = int(fused.get("ts_ms", state.updated_ts_ms))
 
         hand_cards = [item["label"] for item in fused.get("hand_cards", [])]
         table_cards_raw = fused.get("table_trick_cards", [])
@@ -205,7 +237,7 @@ class GameStateEngine:
             uncertainty_notes = list(state.uncertainty.notes)
             uncertainty_notes.extend(transition_notes)
             state.uncertainty.notes = uncertainty_notes[:8]
-            state.updated_ts_ms = int(fused.get("ts_ms", state.updated_ts_ms))
+            state.updated_ts_ms = ts_ms
             return state, TransitionResult(
                 accepted=False,
                 reason="low_legal_transition_score",
@@ -221,7 +253,12 @@ class GameStateEngine:
         ]
         state.trick_cards_by_seat = {t.seat: t.card for t in state.table_trick_cards if t.seat and t.card}
         if state.table_trick_cards and state.trick_open_ts_ms <= 0:
-            state.trick_open_ts_ms = int(fused.get("ts_ms", state.updated_ts_ms))
+            state.trick_open_ts_ms = ts_ms
+
+        for card in state.hand_cards:
+            self._mark_card_state(game_id, card, "IN_HAND", ts_ms)
+        for item in state.table_trick_cards:
+            self._mark_card_state(game_id, item.card, "PLAYED_ON_TABLE", ts_ms, seat=item.seat)
 
         # append history when table has cards and then clears (simple trick-close heuristic)
         if len(state.table_trick_cards) >= 4:
@@ -238,14 +275,16 @@ class GameStateEngine:
             )
             winner_team = "team_me" if winner in {"me", "across"} else "team_opp"
             state.won_piles[winner_team].extend([t.card for t in state.table_trick_cards])
+            for t in state.table_trick_cards:
+                self._mark_card_state(game_id, t.card, f"WON_PILE_{winner_team.upper()}", ts_ms, seat=t.seat)
             state.turn.leader = winner
             state.turn.to_play = winner
-            state.trick_close_ts_ms = int(fused.get("ts_ms", state.updated_ts_ms))
+            state.trick_close_ts_ms = ts_ms
             state.table_trick_cards = []
             state.trick_cards_by_seat = {}
             state.turn.lead_suit = ""
             state.trick_id += 1
-            state.trick_open_ts_ms = int(fused.get("ts_ms", state.updated_ts_ms))
+            state.trick_open_ts_ms = ts_ms
 
         # lead suit from first table card
         if state.table_trick_cards:
@@ -265,7 +304,7 @@ class GameStateEngine:
             state_conf=float(unc.get("state_conf", 0.0)) * transition_score,
             notes=notes[:8],
         )
-        state.updated_ts_ms = int(fused.get("ts_ms", state.updated_ts_ms))
+        state.updated_ts_ms = ts_ms
         state.state_version += 1
         state.last_transition_id = f"{game_id}:{state.state_version}:{state.updated_ts_ms}"
         return state, TransitionResult(accepted=True, reason="ok", reason_code="ok", reason_detail="accepted")

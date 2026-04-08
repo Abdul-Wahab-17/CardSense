@@ -65,7 +65,7 @@ def test_fusion_uniqueness_conflict_resolution():
         camera_id="cam-h",
         ts_ms=1,
         model_name="m",
-        detections=[_det("AS", 0.9, 10, 10, 60, 80)],
+        detections=[_det("AS", 1.0, 10, 10, 60, 80)],
     )
     fusion.update(ev_hand)
     ev_table = DetectionEvent(
@@ -75,11 +75,59 @@ def test_fusion_uniqueness_conflict_resolution():
         camera_id="cam-t",
         ts_ms=2,
         model_name="m",
-        detections=[_det("AS", 0.5, 110, 110, 180, 190)],
+        detections=[_det("AS", 1.0, 110, 110, 180, 190)],
     )
     snap = fusion.update(ev_table)
     table_cards = [c["card"] for c in snap["table_trick_cards"]]
-    assert "AS" not in table_cards
+    hand_cards = [c["label"] for c in snap["hand_cards"]]
+    assert "AS" in table_cards
+    assert "AS" not in hand_cards
+
+
+def test_fusion_hand_to_table_transfer_sticks_during_grace_window():
+    fusion = FusionEngine()
+    fusion.hand_to_table_grace_ms = 1500
+
+    fusion.update(
+        DetectionEvent(
+            game_id="g3b",
+            frame_id="f1",
+            camera_type="hand",
+            camera_id="cam-h",
+            ts_ms=100,
+            model_name="m",
+            detections=[_det("KH", 1.0, 10, 10, 60, 80)],
+        )
+    )
+
+    fusion.update(
+        DetectionEvent(
+            game_id="g3b",
+            frame_id="f2",
+            camera_type="table",
+            camera_id="cam-t",
+            ts_ms=120,
+            model_name="m",
+            detections=[_det("KH", 1.0, 110, 110, 180, 190)],
+        )
+    )
+
+    # Within grace, seeing the same card from hand camera should not move ownership back.
+    snap = fusion.update(
+        DetectionEvent(
+            game_id="g3b",
+            frame_id="f3",
+            camera_type="hand",
+            camera_id="cam-h",
+            ts_ms=200,
+            model_name="m",
+            detections=[_det("KH", 1.0, 11, 11, 61, 81)],
+        )
+    )
+    table_cards = [c["card"] for c in snap["table_trick_cards"]]
+    hand_cards = [c["label"] for c in snap["hand_cards"]]
+    assert "KH" in table_cards
+    assert "KH" not in hand_cards
 
 
 def test_transition_reject_table_to_hand():
@@ -97,6 +145,40 @@ def test_transition_reject_table_to_hand():
     _, transition = engine.apply_fused_observation(fused)
     assert not transition.accepted
     assert transition.reason_code == "table_to_hand_rejected"
+
+
+def test_transition_reject_won_pile_reappearance():
+    engine = GameStateEngine()
+    engine.start_game("g4b", "left", "left", True, "variant_config", trump_suit="S")
+
+    # First observation closes a full trick and puts cards into a won pile.
+    first = {
+        "game_id": "g4b",
+        "ts_ms": 100,
+        "hand_cards": [{"label": "AH", "confidence": 0.9}],
+        "table_trick_cards": [
+            {"seat": "left", "card": "10H", "confidence": 0.9},
+            {"seat": "across", "card": "KH", "confidence": 0.9},
+            {"seat": "right", "card": "2S", "confidence": 0.9},
+            {"seat": "me", "card": "AS", "confidence": 0.9},
+        ],
+        "uncertainty": {"hand_conf": 0.9, "table_conf": 0.9, "state_conf": 0.9, "notes": []},
+    }
+    state, transition = engine.apply_fused_observation(first)
+    assert transition.accepted
+    assert len(state.won_piles["team_me"]) == 4
+
+    # Any won-pile card reappearing should be rejected.
+    second = {
+        "game_id": "g4b",
+        "ts_ms": 150,
+        "hand_cards": [{"label": "AS", "confidence": 0.9}],
+        "table_trick_cards": [],
+        "uncertainty": {"hand_conf": 0.9, "table_conf": 0.9, "state_conf": 0.9, "notes": []},
+    }
+    _, transition2 = engine.apply_fused_observation(second)
+    assert not transition2.accepted
+    assert transition2.reason_code == "won_pile_reappeared"
 
 
 def test_simulator_deterministic_seed():

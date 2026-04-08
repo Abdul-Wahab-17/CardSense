@@ -4,3 +4,6 @@ env/
 java
 .vscode/
 *.pt
+.pytest_cache/
+__pycache__/
+
