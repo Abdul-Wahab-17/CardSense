@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     max_queue_len: int = 5000
     static_dir: str = "frontend"
     hand_size: int = 13
+    default_cards_per_player: int = 13
     min_card_conf: float = 0.02
     hand_memory_events: int = 120
     min_card_votes: int = 1
@@ -93,6 +94,7 @@ class Settings(BaseSettings):
     feature_replay_api: int = 1
     feature_enforce_camera_binding: int = 1
     persist_recommendation_on_transition: int = 1
+    feature_match_state_authoritative: int = 0
 
     # Reconciliation safety
     allow_won_pile_replay: int = 0

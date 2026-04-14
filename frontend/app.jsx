@@ -1,6 +1,6 @@
 const { useEffect, useMemo, useRef, useState } = React;
 
-const THULLA_HAND_SIZE = 13;
+const DEFAULT_HAND_SIZE = 13;
 const SUIT_ORDER = ["S", "H", "D", "C"];
 const SUIT_LABEL = {
   S: "Spades",
@@ -80,6 +80,10 @@ function App() {
   const captureCanvasRef = useRef(document.createElement("canvas"));
 
   const handCards = useMemo(() => hand?.cards || [], [hand]);
+  const handMaxCards = useMemo(() => {
+    const value = Number(hand?.max_cards || 0);
+    return value > 0 ? value : DEFAULT_HAND_SIZE;
+  }, [hand]);
 
   const groupedHand = useMemo(() => {
     const groups = { S: [], H: [], D: [], C: [], OTHER: [] };
@@ -466,7 +470,7 @@ function App() {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean)
-      .slice(0, THULLA_HAND_SIZE);
+      .slice(0, handMaxCards);
 
     try {
       const res = await apiFetch(`/api/hands/${cameraId.trim()}/override`, {
@@ -763,7 +767,7 @@ function App() {
           <section className="panel">
             <div className="panel-head-row">
               <h2 className="panel-title">Your Hand</h2>
-              <span className="panel-subtitle">{handCards.length}/{THULLA_HAND_SIZE} cards | {formatClock(hand?.updated_ts_ms)}</span>
+              <span className="panel-subtitle">{handCards.length}/{handMaxCards} cards | {formatClock(hand?.updated_ts_ms)}</span>
             </div>
             <div className="suit-columns">
               {SUIT_ORDER.map((suit) => (

@@ -636,24 +636,81 @@ async def consume_detections() -> None:
                     )
                     game_state, transition = game_state_engine.apply_fused_observation(fused)
 
-                    # Keep lifecycle reconciliation and transition events centralized in match-engine state.
-                    match_engine.reconcile_card_locations(
-                        parsed.game_id,
-                        hand_cards=list(game_state.hand_cards),
-                        table_cards=[t.model_dump() for t in game_state.table_trick_cards],
-                        won_piles=dict(game_state.won_piles),
-                        ts_ms=int(game_state.updated_ts_ms),
-                    )
-                    match_transition = match_engine.apply_transition_events(
-                        parsed.game_id,
+                    observed_hand = [
                         {
-                            "accepted": transition.accepted,
-                            "reason": transition.reason,
-                            "reason_code": transition.reason_code,
-                            "table_size": len(game_state.table_trick_cards),
-                        },
-                        allow_won_pile_replay=bool(settings.allow_won_pile_replay),
+                            "card": str(item.get("label", "")),
+                            "seat": "me",
+                            "confidence": float(item.get("confidence", 0.0)),
+                            "ts_ms": int(fused.get("ts_ms", parsed.ts_ms)),
+                            "track_id": int(item.get("track_id", 0) or 0),
+                        }
+                        for item in fused.get("hand_cards", [])
+                        if item.get("label")
+                    ]
+                    observed_table = [
+                        {
+                            "card": str(item.get("card", "")),
+                            "seat": str(item.get("seat", "")),
+                            "confidence": float(item.get("confidence", 0.0)),
+                            "ts_ms": int(fused.get("ts_ms", parsed.ts_ms)),
+                            "track_id": int(item.get("track_id", 0) or 0),
+                        }
+                        for item in fused.get("table_trick_cards", [])
+                        if item.get("card")
+                    ]
+
+                    match_state = match_engine.get(parsed.game_id)
+                    if match_state is None:
+                        match_state = match_engine.start_match(
+                            parsed.game_id,
+                            variant=VariantConfig(),
+                            initial_turn=str(game_state.turn.to_play or "me"),
+                        )
+
+                    previous_match_snapshot = match_state.model_copy(deep=True)
+
+                    _, transition_events, reconciliation_debug = match_engine.reconcile_card_locations(
+                        game_id=parsed.game_id,
+                        ts_ms=int(fused.get("ts_ms", parsed.ts_ms)),
+                        hand_cards_observed=observed_hand,
+                        table_cards_observed=observed_table,
+                        prev_lifecycle=dict(match_state.card_lifecycle),
+                        to_play_seat=str(match_state.to_play_seat),
+                        trick_context={"replay_mode": bool(settings.allow_won_pile_replay)},
+                        variant=match_state.variant,
                     )
+                    updated_match_state, invariant_violations = match_engine.apply_transition_events(
+                        match_state,
+                        transition_events,
+                        int(fused.get("ts_ms", parsed.ts_ms)),
+                    )
+                    if not bool(settings.feature_match_state_authoritative):
+                        hand_delta = {
+                            seat: {
+                                "prev": len(previous_match_snapshot.hand_cards_by_seat.get(seat, [])),
+                                "next": len(updated_match_state.hand_cards_by_seat.get(seat, [])),
+                            }
+                            for seat in updated_match_state.variant.seat_order
+                        }
+                        match_transition_drift = {
+                            "to_play_changed": previous_match_snapshot.to_play_seat != updated_match_state.to_play_seat,
+                            "lead_suit_changed": previous_match_snapshot.lead_suit != updated_match_state.lead_suit,
+                            "hand_count_delta": hand_delta,
+                        }
+                        match_engine._states[parsed.game_id] = previous_match_snapshot
+                    else:
+                        match_transition_drift = {}
+                    match_transition = {
+                        "accepted": not bool(invariant_violations),
+                        "reason": "applied" if not invariant_violations else "invariant_rejected",
+                        "reason_code": "ok" if not invariant_violations else "invariant_violation",
+                        "violations": invariant_violations,
+                        "transition_events": transition_events,
+                        "reconciliation_debug": reconciliation_debug,
+                        "drift": match_transition_drift,
+                        "to_play_seat": updated_match_state.to_play_seat,
+                        "lead_suit": updated_match_state.lead_suit,
+                    }
 
                     hand_state = hand_state_store.update(
                         parsed,
@@ -1213,6 +1270,29 @@ async def latest_hands() -> dict:
 
 @app.get("/api/hands/{camera_id}")
 async def latest_hand(camera_id: str) -> dict:
+    bound_game_id = ""
+    seat_hint = ""
+    for game_id, sessions in camera_sessions.items():
+        session = sessions.get(camera_id)
+        if session is None:
+            continue
+        bound_game_id = game_id
+        seat_hint = str(session.seat_hint or "")
+        break
+
+    if bound_game_id and seat_hint:
+        projected = match_engine.project_hand_state_for_camera(bound_game_id, camera_id, seat_hint)
+        if bool(settings.feature_match_state_authoritative) or projected.cards:
+            return {
+                "hand": projected.model_dump(),
+                "debug": {
+                    **hand_state_store.debug(camera_id),
+                    "source": "match_state_authoritative",
+                    "game_id": bound_game_id,
+                    "seat_hint": seat_hint,
+                },
+            }
+
     return {
         "hand": hand_state_store.latest(camera_id).model_dump(),
         "debug": hand_state_store.debug(camera_id),
@@ -1238,6 +1318,7 @@ async def start_game(body: GameStartIn, _claims: dict = Depends(require_auth_rol
         seat_order=body.seat_order,
         play_direction=body.play_direction,
         trick_size=body.trick_size,
+        cards_per_player=body.cards_per_player,
         must_trump_if_void=body.must_trump_if_void,
         trump_suit=body.trump_suit,
         rank_order_map=body.rank_order_map,
@@ -1256,6 +1337,7 @@ async def start_game(body: GameStartIn, _claims: dict = Depends(require_auth_rol
             player_count=body.player_count,
             seat_order=body.seat_order,
             play_direction=body.play_direction,
+            cards_per_player=body.cards_per_player,
             trick_size=body.trick_size,
             rounds_total=body.rounds_total,
             target_points=body.target_points,
@@ -1264,6 +1346,7 @@ async def start_game(body: GameStartIn, _claims: dict = Depends(require_auth_rol
             trump_suit=body.trump_suit,
             rank_order_map=body.rank_order_map or state.rules.rank_order_map,
             team_map=body.team_map,
+            deck_cards=list(body.deck_cards or []),
         )
         match_state = match_engine.start_match(body.game_id, variant, body.to_play)
     except Exception:
@@ -1329,7 +1412,16 @@ async def end_game(game_id: str, _claims: dict = Depends(require_auth_roles({set
 @app.get("/api/games/{game_id}/state")
 async def get_game_state(game_id: str) -> dict:
     state = game_state_engine.get(game_id)
-    return {"state": state.model_dump()}
+    match_state = match_engine.get(game_id)
+    return {
+        "state": state.model_dump(),
+        "match_state": match_state.model_dump() if match_state else None,
+        "variant": {
+            "cards_per_player": int((match_state.variant.cards_per_player if match_state else settings.default_cards_per_player) or settings.default_cards_per_player),
+        },
+        "hand_cards_by_seat": (match_state.hand_cards_by_seat if match_state else {}),
+        "card_lifecycle": ({k: v.model_dump() for k, v in match_state.card_lifecycle.items()} if match_state else {}),
+    }
 
 
 @app.get("/api/games/{game_id}/events")
@@ -1404,6 +1496,8 @@ async def get_table_calibration(game_id: str) -> dict:
 async def game_diagnostics(game_id: str) -> dict:
     state = game_state_engine.get(game_id)
     belief = build_belief(state)
+    match_state = match_engine.get(game_id)
+    match_metrics = match_engine.metrics(game_id)
     return {
         "game_id": game_id,
         "fusion_metrics": fusion_engine.metrics(),
@@ -1413,9 +1507,12 @@ async def game_diagnostics(game_id: str) -> dict:
         "calibration": fusion_engine.get_table_calibration(game_id),
         "camera_sessions": [s.model_dump() for s in camera_sessions.get(game_id, {}).values()],
         "card_lifecycle_summary": {
-            "tracked_cards": len((match_engine.get(game_id).card_lifecycle if match_engine.get(game_id) else {})),
+            "tracked_cards": len((match_state.card_lifecycle if match_state else {})),
         },
-        "rule_violations_recent": [],
+        "rule_violations_recent": (match_state.rule_violations_recent if match_state else []),
+        "invariant_violations_recent": match_metrics.get("invariant_violations_recent", []),
+        "card_duplicate_rejected_total": match_metrics.get("card_duplicate_rejected_total", 0),
+        "expected_vs_actual_hand_count": match_metrics.get("expected_vs_actual_hand_count", {}),
         "transition_latency_ms": storage_metrics,
     }
 

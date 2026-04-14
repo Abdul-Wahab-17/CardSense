@@ -82,7 +82,7 @@ class HandAdvice(BaseModel):
 
 
 class HandOverrideIn(BaseModel):
-    cards: List[str] = Field(..., min_length=0, max_length=13)
+    cards: List[str] = Field(..., min_length=0, max_length=52)
 
 
 class TurnState(BaseModel):
@@ -100,6 +100,7 @@ class GameRules(BaseModel):
     must_trump_if_void: bool = False
     trump_mode: str = "variant_config"
     trump_suit: str = ""
+    cards_per_player: int = 13
     rank_order_map: Dict[str, int] = Field(
         default_factory=lambda: {
             "2": 2,
@@ -160,6 +161,7 @@ class GameStartIn(BaseModel):
     game_id: str = Field(..., min_length=1)
     variant_name: str = "default"
     player_count: int = 4
+    cards_per_player: int = 13
     seat_order: List[str] = Field(default_factory=lambda: ["me", "left", "across", "right"])
     play_direction: Literal["clockwise", "counterclockwise"] = "clockwise"
     rounds_total: int | None = None
@@ -173,6 +175,7 @@ class GameStartIn(BaseModel):
     trump_mode: str = "variant_config"
     trump_suit: str = ""
     rank_order_map: Dict[str, int] | None = None
+    deck_cards: List[str] | None = None
 
 
 class GameConfigIn(BaseModel):
@@ -257,6 +260,7 @@ class VariantConfig(BaseModel):
 class CardLifecycleEntry(BaseModel):
     location: Literal["in_hand", "on_table", "won_pile", "unknown"] = "unknown"
     owner_seat: str | None = None
+    owner_team: str | None = None
     seen_ts_ms: int = 0
     last_transition: str = ""
     confidence: float = 0.0
@@ -279,6 +283,11 @@ class MatchState(BaseModel):
     match_winner_team: str | None = None
     variant: VariantConfig = Field(default_factory=VariantConfig)
     card_lifecycle: Dict[str, CardLifecycleEntry] = Field(default_factory=dict)
+    hand_cards_by_seat: Dict[str, List[str]] = Field(default_factory=dict)
+    rule_violations_recent: List[str] = Field(default_factory=list)
+    invariant_violations_recent: List[str] = Field(default_factory=list)
+    card_duplicate_rejected_total: int = 0
+    hand_count_violation_total: int = 0
 
 
 class CameraBindIn(BaseModel):

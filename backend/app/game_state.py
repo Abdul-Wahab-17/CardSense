@@ -99,6 +99,7 @@ class GameStateEngine:
         seat_order: list[str] | None = None,
         play_direction: str = "clockwise",
         trick_size: int = 4,
+        cards_per_player: int = 13,
         must_trump_if_void: bool = False,
         trump_suit: str = "",
         rank_order_map: dict[str, int] | None = None,
@@ -112,6 +113,7 @@ class GameStateEngine:
                 seat_order=seat_order or ["me", "left", "across", "right"],
                 play_direction=play_direction if play_direction in {"clockwise", "counterclockwise"} else "clockwise",
                 trick_size=max(1, int(trick_size or 4)),
+                cards_per_player=max(1, int(cards_per_player or 13)),
                 must_follow_suit=must_follow_suit,
                 must_trump_if_void=must_trump_if_void,
                 trump_mode=trump_mode,
@@ -260,7 +262,7 @@ class GameStateEngine:
                 reason_detail=reason_detail,
             )
 
-        state.hand_cards = hand_cards[:13]
+        state.hand_cards = hand_cards[: max(1, int(state.rules.cards_per_player or 13))]
         state.table_trick_cards = [
             TableTrickCard(seat=item.get("seat", "unknown"), card=item.get("card", ""), confidence=float(item.get("confidence", 0.0)))
             for item in table_cards_raw
@@ -277,7 +279,7 @@ class GameStateEngine:
 
         # append history when table has cards and then clears (simple trick-close heuristic)
         if len(state.table_trick_cards) >= max(1, int(state.rules.trick_size or 4)):
-            trick_no = (len(state.played_history) // 4) + 1
+            trick_no = (len(state.played_history) // max(1, int(state.rules.trick_size or 4))) + 1
             for t in state.table_trick_cards:
                 state.played_history.append(PlayedHistoryItem(trick_no=trick_no, seat=t.seat, card=t.card))
 

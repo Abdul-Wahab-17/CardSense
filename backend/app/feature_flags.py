@@ -40,4 +40,10 @@ FEATURE_FLAGS_METADATA = {
         "removal_date": "2026-09-01",
         "rollback_behavior": "Disable replay endpoint and broadcast path",
     },
+    "FEATURE_MATCH_STATE_AUTHORITATIVE": {
+        "default": bool(settings.feature_match_state_authoritative),
+        "owner": "state-engine-team",
+        "removal_date": "2026-10-15",
+        "rollback_behavior": "Keep legacy reducer as source of truth",
+    },
 }
