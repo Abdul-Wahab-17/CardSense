@@ -1184,10 +1184,6 @@ async def ingest_frame(body: FrameIn, _claims: dict = Depends(require_auth_roles
     if not await redis_client.exists(camera_key):
         raise HTTPException(status_code=404, detail="Camera not registered")
 
-    queue_depth = int(await redis_client.xlen(settings.frame_stream))
-    if queue_depth >= int(settings.max_queue_len):
-        raise HTTPException(status_code=429, detail="Frame queue backpressure active")
-
     if not _ingest_allowed(body.camera_id, int(body.ts_ms)):
         raise HTTPException(status_code=429, detail="Frame ingest rate limit exceeded for camera")
 
@@ -1224,10 +1220,6 @@ async def ingest_frame_batch(body: FrameBatchIn, _claims: dict = Depends(require
         if not await redis_client.exists(camera_key):
             raise HTTPException(status_code=404, detail=f"Camera not registered: {frame.camera_id}")
         _require_bound_camera(frame.game_id, frame.camera_id, frame.camera_type)
-
-    queue_depth = int(await redis_client.xlen(settings.frame_stream))
-    if queue_depth >= int(settings.max_queue_len):
-        raise HTTPException(status_code=429, detail="Frame queue backpressure active")
 
     pipeline = redis_client.pipeline(transaction=False)
     for frame in body.frames:
