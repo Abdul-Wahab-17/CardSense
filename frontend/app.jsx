@@ -32,6 +32,37 @@ function formatClock(tsMs) {
   return new Date(Number(tsMs)).toLocaleTimeString();
 }
 
+function backendHttpBase() {
+  const queryBase = new URLSearchParams(location.search).get("backend") || "";
+  const savedBase = localStorage.getItem("cardsense_backend_base") || "";
+  const configuredBase = (queryBase || savedBase).trim();
+  if (configuredBase) {
+    const normalized = configuredBase.replace(/\/$/, "");
+    localStorage.setItem("cardsense_backend_base", normalized);
+    return normalized;
+  }
+  const protocol = location.protocol || "http:";
+  const host = location.hostname || "localhost";
+  if (String(location.port || "") === "8080") {
+    return `${protocol}//${host}:8000`;
+  }
+  return `${protocol}//${location.host}`;
+}
+
+function backendWsBase() {
+  const httpBase = backendHttpBase();
+  const parsed = new URL(httpBase);
+  const wsProtocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+  return `${wsProtocol}//${parsed.host}`;
+}
+
+function backendUrl(path) {
+  if (!path) return backendHttpBase();
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return `${backendHttpBase()}${suffix}`;
+}
+
 function App() {
   const [gameId, setGameId] = useState("default-game");
   const [cameraId, setCameraId] = useState("cam-1");
@@ -76,6 +107,12 @@ function App() {
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const streamTimerRef = useRef(null);
+  const wsRef = useRef(null);
+  const wsReconnectTimerRef = useRef(null);
+  const wsRetryRef = useRef(0);
+  const refreshInFlightRef = useRef(null);
+  const accessTokenRef = useRef(accessToken);
+  const refreshTokenRef = useRef(refreshToken);
   const frameBatchRef = useRef([]);
   const captureCanvasRef = useRef(document.createElement("canvas"));
 
@@ -135,17 +172,96 @@ function App() {
     ? recommendation.action_scores.length
     : null;
 
-  async function apiFetch(url, options = {}) {
-    const headers = { ...(options.headers || {}) };
-    if (accessToken) {
-      headers.Authorization = `Bearer ${accessToken}`;
+  function persistAuth(access, refresh, sess) {
+    const safeAccess = access || "";
+    const safeRefresh = refresh || "";
+    const safeSession = sess || "";
+    setAccessToken(safeAccess);
+    setRefreshToken(safeRefresh);
+    setSessionId(safeSession);
+    accessTokenRef.current = safeAccess;
+    refreshTokenRef.current = safeRefresh;
+    localStorage.setItem("cardsense_access_token", safeAccess);
+    localStorage.setItem("cardsense_refresh_token", safeRefresh);
+    localStorage.setItem("cardsense_session_id", safeSession);
+  }
+
+  function clearAuthSession() {
+    setAccessToken("");
+    setRefreshToken("");
+    setSessionId("");
+    accessTokenRef.current = "";
+    refreshTokenRef.current = "";
+    localStorage.removeItem("cardsense_access_token");
+    localStorage.removeItem("cardsense_refresh_token");
+    localStorage.removeItem("cardsense_session_id");
+  }
+
+  async function refreshAccessToken() {
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
     }
-    return fetch(url, { ...options, headers });
+    const token = refreshTokenRef.current;
+    if (!token) {
+      throw new Error("Missing refresh token");
+    }
+
+    refreshInFlightRef.current = (async () => {
+      const res = await fetch(backendUrl("/api/auth/refresh"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: token }),
+      });
+      if (!res.ok) {
+        clearAuthSession();
+        throw new Error("Session expired");
+      }
+      const payload = await res.json();
+      persistAuth(payload.access_token || "", payload.refresh_token || "", payload.session_id || sessionId);
+      return payload;
+    })();
+
+    try {
+      return await refreshInFlightRef.current;
+    } finally {
+      refreshInFlightRef.current = null;
+    }
+  }
+
+  async function apiFetch(url, options = {}) {
+    const fetchOptions = { ...options };
+    const retry401 = fetchOptions.retry401 !== false;
+    delete fetchOptions.retry401;
+
+    const headers = { ...(fetchOptions.headers || {}) };
+    if (accessTokenRef.current) {
+      headers.Authorization = `Bearer ${accessTokenRef.current}`;
+    }
+
+    let response = await fetch(backendUrl(url), { ...fetchOptions, headers });
+    const isAuthEndpoint = String(url).includes("/api/auth/login") || String(url).includes("/api/auth/register");
+    if (response.status === 401 && retry401 && !isAuthEndpoint && refreshTokenRef.current) {
+      try {
+        await refreshAccessToken();
+        const retryHeaders = { ...(fetchOptions.headers || {}) };
+        if (accessTokenRef.current) {
+          retryHeaders.Authorization = `Bearer ${accessTokenRef.current}`;
+        }
+        response = await fetch(backendUrl(url), { ...fetchOptions, headers: retryHeaders });
+      } catch (_) {
+        clearAuthSession();
+        return response;
+      }
+    }
+    if (response.status === 401 && retry401 && !isAuthEndpoint && !refreshTokenRef.current) {
+      clearAuthSession();
+    }
+    return response;
   }
 
   async function login() {
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await fetch(backendUrl("/api/auth/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim(), password }),
@@ -155,13 +271,8 @@ function App() {
       const access = payload.access_token || "";
       const refresh = payload.refresh_token || "";
       const sess = payload.session_id || "";
-      setAccessToken(access);
-      setRefreshToken(refresh);
-      setSessionId(sess);
+      persistAuth(access, refresh, sess);
       localStorage.setItem("cardsense_email", email.trim());
-      localStorage.setItem("cardsense_access_token", access);
-      localStorage.setItem("cardsense_refresh_token", refresh);
-      localStorage.setItem("cardsense_session_id", sess);
       setPassword("");
       setRegisterStatus("Authenticated");
     } catch (err) {
@@ -176,18 +287,22 @@ function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ refresh_token: refreshToken }),
+          retry401: false,
         });
       }
     } finally {
-      setAccessToken("");
-      setRefreshToken("");
-      setSessionId("");
-      localStorage.removeItem("cardsense_access_token");
-      localStorage.removeItem("cardsense_refresh_token");
-      localStorage.removeItem("cardsense_session_id");
+      clearAuthSession();
       setRegisterStatus("Logged out");
     }
   }
+
+  useEffect(() => {
+    accessTokenRef.current = accessToken;
+  }, [accessToken]);
+
+  useEffect(() => {
+    refreshTokenRef.current = refreshToken;
+  }, [refreshToken]);
 
   async function registerCamera(event) {
     event.preventDefault();
@@ -257,39 +372,89 @@ function App() {
   useEffect(() => {
     loadInitialData();
 
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const tokenParam = accessToken ? `?token=${encodeURIComponent(accessToken)}` : "";
-    const ws = new WebSocket(`${protocol}://${location.host}/ws/detections${tokenParam}`);
+    let cancelled = false;
 
-    ws.onmessage = (msg) => {
-      try {
-        const event = JSON.parse(msg.data);
-        setEvents((prev) => [event, ...prev].slice(0, 60));
-        setLastEventAt(Date.now());
+    const clearReconnectTimer = () => {
+      if (wsReconnectTimerRef.current) {
+        clearTimeout(wsReconnectTimerRef.current);
+        wsReconnectTimerRef.current = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      clearReconnectTimer();
+      const attempts = Math.min(wsRetryRef.current + 1, 6);
+      wsRetryRef.current = attempts;
+      const backoffMs = Math.min(1000 * (2 ** (attempts - 1)), 10000);
+      wsReconnectTimerRef.current = setTimeout(() => {
+        connectWebSocket();
+      }, backoffMs);
+    };
+
+    const connectWebSocket = () => {
+      if (cancelled) return;
+      const token = accessTokenRef.current;
+      if (!token) {
+        setWsConnected(false);
+        setLastError("Login required for realtime updates.");
+        return;
+      }
+
+      const tokenParam = `?token=${encodeURIComponent(token)}`;
+      const ws = new WebSocket(`${backendWsBase()}/ws/detections${tokenParam}`);
+      wsRef.current = ws;
+
+      ws.onmessage = (msg) => {
+        try {
+          const event = JSON.parse(msg.data);
+          if (event?.type === "ping") {
+            return;
+          }
+          setEvents((prev) => [event, ...prev].slice(0, 60));
+          setLastEventAt(Date.now());
+          setLastError("");
+          if (event.hand_state) setHand(event.hand_state);
+          if (event.advice) setAdvice(event.advice);
+          if (event.hand_debug) setHandDebug(event.hand_debug);
+          if (event.camera_id === cameraId.trim() && event.debug) setDebugInfo(event.debug);
+        } catch (_) {}
+      };
+
+      ws.onopen = () => {
+        wsRetryRef.current = 0;
+        setWsConnected(true);
         setLastError("");
-        if (event.hand_state) setHand(event.hand_state);
-        if (event.advice) setAdvice(event.advice);
-        if (event.hand_debug) setHandDebug(event.hand_debug);
-        if (event.camera_id === cameraId.trim() && event.debug) setDebugInfo(event.debug);
-      } catch (_) {}
-    };
+      };
 
-    ws.onopen = () => setWsConnected(true);
+      ws.onerror = () => setLastError("WebSocket error.");
 
-    ws.onerror = () => setLastError("WebSocket error.");
-
-    ws.onclose = () => {
-      setWsConnected(false);
-      setTimeout(() => {
-        if (!window.__cardsenseReloaded) {
-          window.__cardsenseReloaded = true;
-          location.reload();
+      ws.onclose = async (evt) => {
+        setWsConnected(false);
+        const code = Number(evt?.code || 0);
+        const reason = String(evt?.reason || "");
+        const suffix = reason ? ` (${reason})` : "";
+        setLastError(`WebSocket closed: ${code}${suffix}`);
+        if (cancelled) {
+          return;
         }
-      }, 1000);
+        if (code === 4401 && refreshTokenRef.current) {
+          try {
+            await refreshAccessToken();
+          } catch (_) {}
+        }
+        scheduleReconnect();
+      };
     };
+
+    connectWebSocket();
 
     return () => {
-      ws.close();
+      cancelled = true;
+      clearReconnectTimer();
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
       stopWebcamStream();
     };
   }, [accessToken]);
@@ -317,21 +482,26 @@ function App() {
     const loadRecommendation = async () => {
       const gid = gameId.trim() || "default-game";
       try {
-        const [recRes, stateRes, diagRes, setupRes, beliefRes, simRes] = await Promise.all([
+        const [recRes, stateRes, diagRes, beliefRes, simRes] = await Promise.all([
           apiFetch(`/api/games/${encodeURIComponent(gid)}/recommendation`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/state`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/diagnostics`),
-          apiFetch(`/api/games/${encodeURIComponent(gid)}/setup/diagnostics`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/belief`),
           apiFetch(`/api/games/${encodeURIComponent(gid)}/simulation/debug?simulation_seed=1337&rollout_count=96`),
         ]);
+        let setupRes = null;
+        if (accessTokenRef.current) {
+          setupRes = await apiFetch(`/api/games/${encodeURIComponent(gid)}/setup/diagnostics`);
+        } else {
+          setSetupDiagnostics({ ok: false, detail: "Login required" });
+        }
         if (recRes.ok) setRecommendation(await recRes.json());
         if (stateRes.ok) {
           const gs = await stateRes.json();
           setGameState(gs.state || null);
         }
         if (diagRes.ok) setGameDiagnostics(await diagRes.json());
-        if (setupRes.ok) setSetupDiagnostics(await setupRes.json());
+        if (setupRes && setupRes.ok) setSetupDiagnostics(await setupRes.json());
         if (beliefRes.ok) setBeliefView(await beliefRes.json());
         if (simRes.ok) setSimulationDebug(await simRes.json());
       } catch (_) {}
@@ -340,7 +510,7 @@ function App() {
     loadRecommendation();
     timer = setInterval(loadRecommendation, 2500);
     return () => clearInterval(timer);
-  }, [gameId]);
+  }, [gameId, accessToken]);
 
   function frameToBase64(videoEl) {
     const width = videoEl.videoWidth;
@@ -573,7 +743,7 @@ function App() {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <p className="kicker">Thulla CV Assistant</p>
+        <p className="kicker">Dual-Camera LLM Assistant</p>
         <h1>CardSense Game Engine UI</h1>
         <p className="subtitle">Decision-first interface for hand + table camera signals, legal move filtering, and live recommendation guidance.</p>
       </header>
@@ -606,6 +776,7 @@ function App() {
             <div className="button-row">
               <button className="btn btn-secondary" type="button" onClick={login}>Login</button>
               <button className="btn btn-secondary" type="button" onClick={logout}>Logout</button>
+              <a className="btn btn-secondary" href="/signup.html">Signup</a>
             </div>
             <form className="form-grid" onSubmit={registerCamera}>
               <label className="field">

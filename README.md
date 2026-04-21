@@ -1,6 +1,6 @@
 # CardSense Distributed MVP (Queue + Parallel YOLO Workers)
 
-This repository now includes a working distributed backend/frontend stack for real-time card detection, with a Thulla hand-view mode.
+This repository includes a distributed backend/frontend stack for real-time card detection with dual-camera game assistance and LLM-ready move guidance.
 
 ## M2 execution planning
 
@@ -22,9 +22,10 @@ This repository now includes a working distributed backend/frontend stack for re
   - `WS /ws/detections` for live frontend updates
 - Redis Streams queue for frame jobs + detection events
 - Parallel worker service running lightweight YOLO card model (`yolov8n-playing-cards`) with multi-process execution per machine
-- React frontend dashboard with Thulla hand slots (13 cards) + live detections (served by backend)
-- Thulla helper suggestions (discard candidates, suit strength, sequence/pair hints)
-- Manual hand override mode to test Thulla helper when model quality is poor
+- React frontend dashboard with hand slots (13 cards), table state, and live detections
+- Game recommendation API (`/api/games/{game_id}/recommendation`) with legal-move filtering
+- Optional LLM advisor mode (rules passed in prompt, legal move constrained server-side)
+- Manual hand override mode to validate recommendation flow when model quality is poor
 - Edge camera client script to push webcam/RTSP frames
 
 ## Folder structure
@@ -70,12 +71,12 @@ docker compose up --build
 
 - http://localhost:8000
 
-3. In the dashboard:
+3. In the dashboard (two-device flow):
 
-- Register camera (`cam-1`)
-- Click **Start webcam stream**
+- Device A: login, set `Game ID`, set `Camera Type=hand`, register `camera_id` (example `cam-hand`), start stream.
+- Device B: login with the same account, same `Game ID`, set `Camera Type=table`, register `camera_id` (example `cam-table`), start stream.
 
-This starts sending browser webcam frames to `/api/frames/batch`, so detections and Thulla help appear live.
+This sends both feeds to `/api/frames/batch`, enabling hand + table fused state and recommendation updates.
 
 4. (Optional) Start an external edge client from host (or another machine):
 
@@ -167,7 +168,28 @@ Live Debug panel now shows:
 - per-pass rotation/scale candidate counts
 - low-threshold probe top classes
 
-If detection quality is inconsistent, use **Test Mode (Manual Hand)** in the UI to validate Thulla game logic independently of model quality.
+If detection quality is inconsistent, use **Test Mode (Manual Hand)** in the UI to validate recommendation flow independently of model quality.
+
+## LLM advisor setup
+
+Set these in `.env` (or environment):
+
+- `ADVISOR_MODE=hybrid` (or `llm`)
+- `LLM_ENABLED=1`
+- `LLM_API_KEY=<your key>`
+- `LLM_MODEL=<model id>`
+- optional: `LLM_RULES_TEXT=<your variant rules/instructions>`
+
+Behavior:
+
+- `rules`: deterministic simulator only.
+- `hybrid`: deterministic scorer + LLM explanation/selection (legality-checked).
+- `llm`: LLM-first with deterministic fallback when LLM is unavailable.
+
+Temporal consensus tuning (for N-of-M frame stability):
+
+- `HAND_CONSENSUS_WINDOW_FRAMES`, `HAND_CONSENSUS_MIN_SAMPLES`, `HAND_CONSENSUS_MIN_RATIO`
+- `FUSION_CONSENSUS_WINDOW_FRAMES`, `FUSION_CONSENSUS_MIN_SAMPLES`, `FUSION_CONSENSUS_MIN_RATIO`
 
 Worker can run in slower but more accurate mode:
 

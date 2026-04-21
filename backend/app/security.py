@@ -134,8 +134,9 @@ def require_auth_roles(allowed_roles: set[str]):
 def ws_validate_token(token: str | None) -> dict[str, Any]:
     if not bool(settings.auth_enabled):
         return {"sub": "anonymous", "roles": ["anonymous"]}
+    # Permit anonymous websocket subscribers for UI stability pre-login.
     if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing websocket token")
+        return {"sub": "anonymous", "roles": ["anonymous"]}
     return _decode_jwt(token)
 
 

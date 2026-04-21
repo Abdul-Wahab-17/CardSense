@@ -6,4 +6,5 @@ java
 *.pt
 .pytest_cache/
 __pycache__/
-
+worker/__pycache__
+*.db

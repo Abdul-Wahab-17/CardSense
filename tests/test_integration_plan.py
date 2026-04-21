@@ -2,8 +2,8 @@ import asyncio
 
 from backend.app.fusion import FusionEngine
 from backend.app.game_state import GameStateEngine
-from backend.app.main import _build_advisor_response, _mark_frame_seen, game_state_engine, pipeline_metrics
-from backend.app.models import BBox, Detection, DetectionEvent
+from backend.app.main import _build_advisor_response, _card_tracking_sets, _mark_frame_seen, game_state_engine, pipeline_metrics
+from backend.app.models import BBox, CardLifecycleEntry, Detection, DetectionEvent, MatchState, PlayedHistoryItem
 from worker.worker import is_out_of_order_frame
 
 
@@ -130,3 +130,70 @@ def test_recommendation_endpoint_contract_non_empty_explanations():
     rec = _build_advisor_response(g, simulation_seed=123)
     assert rec.why
     assert rec.uncertainty_notes
+
+
+def test_fusion_temporal_consensus_prefers_4_of_5_votes():
+    fusion = FusionEngine()
+    fusion.consensus_window_frames = 5
+    fusion.consensus_min_samples = 5
+    fusion.consensus_min_ratio = 0.75
+
+    seq = ["AS", "AS", "AS", "AS", "KS"]
+    snap = None
+    for idx, label in enumerate(seq, start=1):
+        ev = DetectionEvent(
+            game_id="ig-cons-1",
+            frame_id=f"f{idx}",
+            camera_type="hand",
+            camera_id="cam-h",
+            ts_ms=100 + idx,
+            model_name="m",
+            detections=[_det(label, 0.95, 10, 10, 60, 80)],
+        )
+        snap = fusion.update(ev, source_worker="w", source_model="m")
+
+    labels = [row["label"] for row in (snap or {}).get("hand_cards", [])]
+    assert "AS" in labels
+    assert "KS" not in labels
+
+
+def test_fusion_temporal_consensus_rejects_unstable_votes():
+    fusion = FusionEngine()
+    fusion.consensus_window_frames = 5
+    fusion.consensus_min_samples = 5
+    fusion.consensus_min_ratio = 0.8
+
+    seq = ["AS", "KS", "AS", "KS", "QS"]
+    snap = None
+    for idx, label in enumerate(seq, start=1):
+        ev = DetectionEvent(
+            game_id="ig-cons-2",
+            frame_id=f"f{idx}",
+            camera_type="hand",
+            camera_id="cam-h",
+            ts_ms=200 + idx,
+            model_name="m",
+            detections=[_det(label, 0.95, 10, 10, 60, 80)],
+        )
+        snap = fusion.update(ev, source_worker="w", source_model="m")
+
+    assert (snap or {}).get("hand_cards", []) == []
+
+
+def test_card_tracking_sets_cover_lifecycle_and_history():
+    state = MatchState(game_id="ig-sets")
+    state.card_lifecycle = {
+        "AS": CardLifecycleEntry(location="in_hand", owner_seat="me", seen_ts_ms=100, confidence=0.9),
+        "KH": CardLifecycleEntry(location="on_table", owner_seat="left", seen_ts_ms=100, confidence=0.9),
+        "2D": CardLifecycleEntry(location="won_pile", owner_team="team_me", seen_ts_ms=100, confidence=1.0),
+        "9C": CardLifecycleEntry(location="unknown", seen_ts_ms=100, confidence=0.5),
+    }
+    state.played_history = [PlayedHistoryItem(trick_no=1, seat="left", card="KH"), PlayedHistoryItem(trick_no=1, seat="me", card="JS")]
+
+    sets = _card_tracking_sets(state)
+    assert "AS" in sets["in_hand_cards"]
+    assert "KH" in sets["on_table_cards"]
+    assert "2D" in sets["won_pile_cards"]
+    assert "9C" in sets["unknown_cards"]
+    assert "JS" in sets["played_history_cards"]
+    assert "JS" in sets["seen_cards"]

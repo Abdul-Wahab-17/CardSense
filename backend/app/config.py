@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     max_transition_gap_ms: int = 3000
     max_table_growth_per_event: int = 1
 
+    # Temporal consensus for frame-to-card stabilization
+    hand_consensus_window_frames: int = 5
+    hand_consensus_min_samples: int = 3
+    hand_consensus_min_ratio: float = 0.6
+    fusion_consensus_window_frames: int = 5
+    fusion_consensus_min_samples: int = 3
+    fusion_consensus_min_ratio: float = 0.6
+
     # Deployment and release
     deploy_env: str = "dev"
     release_version: str = "dev-local"
@@ -106,6 +114,17 @@ class Settings(BaseSettings):
 
     # Camera readiness / stale gating
     camera_stale_threshold_ms: int = 5000
+
+    # Advisor mode / LLM guidance
+    advisor_mode: str = "rules"  # rules|hybrid|llm
+    llm_enabled: int = 0
+    llm_api_base: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4o-mini"
+    llm_timeout_sec: float = 8.0
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 300
+    llm_rules_text: str = ""
 
     # Multi-machine model registry
     model_provider: str = "filesystem"  # filesystem|http|s3

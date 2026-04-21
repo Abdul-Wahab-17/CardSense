@@ -14,6 +14,8 @@ services:
       POSTGRES_PASSWORD: cardsense
     ports:
       - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - cardsense-db:/var/lib/postgresql/data
 
   api-service:
     build:
@@ -31,7 +33,9 @@ services:
       - redis
       - db
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
+    volumes:
+      - ./data:/app/data
 
   reducer-service:
     profiles: ["split-reducer"]
@@ -52,6 +56,8 @@ services:
     depends_on:
       - redis
       - db
+    volumes:
+      - ./data:/app/data
 
   worker-service:
     build:
@@ -90,6 +96,9 @@ services:
     image: nginx:1.27-alpine
     container_name: cardsense-frontend
     ports:
-      - "8080:80"
+      - "0.0.0.0:8080:80"
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
+
+volumes:
+  cardsense-db:

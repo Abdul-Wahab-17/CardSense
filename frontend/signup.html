@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CardSense Signup</title>
+    <style>
+      :root {
+        --bg: #0f1419;
+        --panel: #18212b;
+        --text: #f3f6fa;
+        --muted: #9db0c2;
+        --accent: #23b26d;
+        --danger: #d75a5a;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+        background: radial-gradient(1200px 500px at 20% -10%, #203447 0%, var(--bg) 40%, #0b1116 100%);
+        color: var(--text);
+        display: grid;
+        place-items: center;
+      }
+      .card {
+        width: min(520px, 92vw);
+        background: color-mix(in srgb, var(--panel) 92%, black);
+        border: 1px solid #243646;
+        border-radius: 14px;
+        padding: 22px;
+        box-shadow: 0 16px 50px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 1.5rem;
+      }
+      p {
+        margin: 0 0 16px;
+        color: var(--muted);
+      }
+      .row {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 12px;
+      }
+      input {
+        border: 1px solid #2c4357;
+        border-radius: 10px;
+        background: #0f171e;
+        color: var(--text);
+        padding: 11px 12px;
+        font-size: 0.95rem;
+      }
+      input:focus {
+        outline: 2px solid #2f8cc6;
+        border-color: transparent;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 14px;
+      }
+      button,
+      a {
+        border: 1px solid #2e465c;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 0.95rem;
+        color: var(--text);
+        background: #13212c;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        color: #062514;
+        border-color: #1f8b55;
+        font-weight: 700;
+      }
+      .status {
+        margin-top: 12px;
+        min-height: 22px;
+      }
+      .ok { color: #89e6b6; }
+      .err { color: #ff9e9e; }
+      .hint {
+        margin-top: 14px;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      code {
+        background: #0d151c;
+        border: 1px solid #284258;
+        border-radius: 6px;
+        padding: 2px 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Create Account</h1>
+      <p>Register your own login instead of preloading fixed email/password pairs.</p>
+      <form id="signup-form">
+        <label class="row">
+          <span>Display Name</span>
+          <input id="display-name" type="text" placeholder="Player 1" maxlength="80" />
+        </label>
+        <label class="row">
+          <span>Email</span>
+          <input id="email" type="email" placeholder="you@example.com" required />
+        </label>
+        <label class="row">
+          <span>Password (min 8 chars)</span>
+          <input id="password" type="password" minlength="8" required />
+        </label>
+        <div class="actions">
+          <button class="primary" type="submit">Sign Up</button>
+          <a href="/">Back To App</a>
+        </div>
+      </form>
+      <div class="status" id="status"></div>
+      <div class="hint">Optional backend override: open this page with <code>?backend=http://YOUR_IP:8000</code>.</div>
+    </main>
+    <script type="module" src="signup.js"></script>
+  </body>
+</html>

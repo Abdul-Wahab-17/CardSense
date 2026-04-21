@@ -46,6 +46,7 @@ class Track:
     det_conf_avg: float = 0.0
     source_workers: Dict[str, int] = field(default_factory=dict)
     source_models: Dict[str, int] = field(default_factory=dict)
+    label_votes: List[str] = field(default_factory=list)
     miss_count: int = 0
     state: str = "active"
 
@@ -81,6 +82,9 @@ class FusionEngine:
         self.expire_miss_threshold = 6
         self.worker_reliability_weight = 0.05
         self.model_reliability_weight = 0.05
+        self.consensus_window_frames = max(1, int(settings.fusion_consensus_window_frames))
+        self.consensus_min_samples = max(1, int(settings.fusion_consensus_min_samples))
+        self.consensus_min_ratio = max(0.0, min(1.0, float(settings.fusion_consensus_min_ratio)))
         self.source_reliability_worker: Dict[str, float] = defaultdict(lambda: 1.0)
         self.source_reliability_model: Dict[str, float] = defaultdict(lambda: 1.0)
         self._calibration: Dict[str, dict] = defaultdict(dict)
@@ -237,6 +241,16 @@ class FusionEngine:
                 probs[label] = float(det.card_conf_top1 or det.conf or 0.0)
         return _normalize(probs)
 
+    def _track_consensus(self, track: Track, label: str) -> tuple[int, int, float]:
+        if not label:
+            return 0, 0, 0.0
+        samples = len(track.label_votes)
+        if samples <= 0:
+            return 0, 0, 0.0
+        support = sum(1 for item in track.label_votes if str(item).upper() == str(label).upper())
+        ratio = float(support) / float(samples)
+        return support, samples, ratio
+
     def _dedupe_frame(self, detections: List[Detection]) -> List[Detection]:
         out: List[Detection] = []
         ordered = sorted(detections, key=lambda d: float(d.det_conf or d.conf), reverse=True)
@@ -269,6 +283,7 @@ class FusionEngine:
         for det in detections:
             bbox = (float(det.bbox.x1), float(det.bbox.y1), float(det.bbox.x2), float(det.bbox.y2))
             probs = self._detection_probs(det)
+            obs_label = max(probs.items(), key=lambda kv: kv[1])[0] if probs else ""
             det_conf = float(det.det_conf or det.conf or 0.0)
 
             best_idx = -1
@@ -311,6 +326,10 @@ class FusionEngine:
                     track.source_workers[source_worker] = track.source_workers.get(source_worker, 0) + 1
                 if source_model:
                     track.source_models[source_model] = track.source_models.get(source_model, 0) + 1
+                if obs_label:
+                    track.label_votes.append(str(obs_label))
+                    if len(track.label_votes) > self.consensus_window_frames:
+                        track.label_votes = track.label_votes[-self.consensus_window_frames :]
             else:
                 self._next_id[key] += 1
                 t = Track(
@@ -325,6 +344,8 @@ class FusionEngine:
                     t.source_workers[source_worker] = 1
                 if source_model:
                     t.source_models[source_model] = 1
+                if obs_label:
+                    t.label_votes = [str(obs_label)]
                 tracks.append(t)
 
         self._tracks[key] = tracks
@@ -344,6 +365,9 @@ class FusionEngine:
                 continue
             entropy = self._entropy(track.posterior)
             if entropy > self.posterior_entropy_threshold:
+                continue
+            consensus_support, consensus_samples, consensus_ratio = self._track_consensus(track, label)
+            if consensus_samples >= self.consensus_min_samples and consensus_ratio < self.consensus_min_ratio:
                 continue
             used.add(label)
             conf = max(prob, track.det_conf_avg)
@@ -367,6 +391,9 @@ class FusionEngine:
                     "uniqueness_score": round(uniqueness_score, 4),
                 },
                 "joint_score": round(joint_score, 4),
+                "consensus_support": int(consensus_support),
+                "consensus_samples": int(consensus_samples),
+                "consensus_ratio": round(float(consensus_ratio), 4),
                 "source_workers": track.source_workers,
                 "source_models": track.source_models,
                 "posterior": sorted(track.posterior.items(), key=lambda kv: kv[1], reverse=True)[:3],
@@ -395,6 +422,9 @@ class FusionEngine:
             entropy = self._entropy(track.posterior)
             if entropy > self.posterior_entropy_threshold:
                 continue
+            consensus_support, consensus_samples, consensus_ratio = self._track_consensus(track, label)
+            if consensus_samples >= self.consensus_min_samples and consensus_ratio < self.consensus_min_ratio:
+                continue
             conf = max(prob, track.det_conf_avg)
             conf_values.append(conf)
             fallback_seat = seat_order[min(i, len(seat_order) - 1)]
@@ -418,6 +448,9 @@ class FusionEngine:
                     "uniqueness_score": round(uniqueness_score, 4),
                 },
                 "joint_score": round(joint_score, 4),
+                "consensus_support": int(consensus_support),
+                "consensus_samples": int(consensus_samples),
+                "consensus_ratio": round(float(consensus_ratio), 4),
             })
         mean_conf = (sum(conf_values) / len(conf_values)) if conf_values else 0.0
         return table, mean_conf
@@ -548,6 +581,9 @@ class FusionEngine:
                 "avg_track_stability": round(avg_stability, 4),
                 "posterior_entropy_threshold": round(self.posterior_entropy_threshold, 4),
                 "hand_to_table_grace_ms": int(self.hand_to_table_grace_ms),
+                "consensus_window_frames": int(self.consensus_window_frames),
+                "consensus_min_samples": int(self.consensus_min_samples),
+                "consensus_min_ratio": round(float(self.consensus_min_ratio), 4),
                 "occluded_tracks": occluded_ids,
             },
         }

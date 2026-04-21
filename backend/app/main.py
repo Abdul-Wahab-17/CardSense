@@ -11,12 +11,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from .config import settings
+from .advice import build_basic_hand_advice, build_hand_advice_from_recommendation
 from .belief import belief_diagnostics, build_belief
 from .auth_store import AuthStore
 from .autoscaler import compute_desired_workers
 from .feature_flags import FEATURE_FLAGS_METADATA
 from .fusion import FusionEngine
 from .game_state import GameStateEngine
+from .llm_advisor import llm_advisor_enabled, request_llm_recommendation
 from .match_engine import MatchEngine
 from .models import (
     ActionScore,
@@ -56,7 +58,6 @@ from .recommendation_v2 import (
 )
 from .simulator import evaluate_actions
 from .storage import EventStore
-from .thulla import build_thulla_advice
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -142,6 +143,9 @@ class HandStateStore:
         self._track_stale_ms = 3500
         self._min_track_hits = 2
         self._single_hit_conf_override = 0.80
+        self._consensus_window_frames = max(1, int(settings.hand_consensus_window_frames))
+        self._consensus_min_samples = max(1, int(settings.hand_consensus_min_samples))
+        self._consensus_min_ratio = max(0.0, min(1.0, float(settings.hand_consensus_min_ratio)))
 
     def _label_candidates(self, track: dict) -> list[tuple[str, float, float]]:
         candidates: list[tuple[str, float, float]] = []
@@ -155,6 +159,17 @@ class HandStateStore:
             candidates.append((label, score, conf))
         candidates.sort(key=lambda item: item[1], reverse=True)
         return candidates
+
+    def _track_consensus(self, track: dict, label: str) -> tuple[int, int, float]:
+        if not label:
+            return 0, 0, 0.0
+        votes = [str(v) for v in track.get("label_votes", []) if str(v)]
+        samples = len(votes)
+        if samples <= 0:
+            return 0, 0, 0.0
+        support = sum(1 for vote in votes if vote.upper() == str(label).upper())
+        ratio = float(support) / float(samples)
+        return support, samples, ratio
 
     def _dedupe_frame(self, detections: list[tuple[str, float, tuple[float, float, float, float]]]) -> list[tuple[str, float, tuple[float, float, float, float]]]:
         kept: list[tuple[str, float, tuple[float, float, float, float]]] = []
@@ -222,6 +237,7 @@ class HandStateStore:
                     "workers": set(),
                     "models": set(),
                     "labels": {},
+                    "label_votes": [],
                 }
                 active_tracks.append(track)
 
@@ -234,6 +250,9 @@ class HandStateStore:
             label_stats["count"] += 1.0
             label_stats["sum_conf"] += conf
             label_stats["max_conf"] = max(float(label_stats["max_conf"]), conf)
+            track.setdefault("label_votes", []).append(str(label))
+            if len(track["label_votes"]) > self._consensus_window_frames:
+                track["label_votes"] = track["label_votes"][-self._consensus_window_frames :]
 
         self._tracks[camera_id] = active_tracks
         self._debug[camera_id] = {
@@ -274,8 +293,16 @@ class HandStateStore:
             label_stats = track["labels"].get(top_label, {})
             if float(label_stats.get("count", 0.0)) < settings.min_card_votes:
                 continue
+            consensus_support, consensus_samples, consensus_ratio = self._track_consensus(track, top_label)
+            if consensus_samples >= self._consensus_min_samples and consensus_ratio < self._consensus_min_ratio:
+                continue
 
             track["_candidates"] = candidates
+            track["_consensus"] = {
+                "support": int(consensus_support),
+                "samples": int(consensus_samples),
+                "ratio": float(consensus_ratio),
+            }
             track_accepted += 1
 
         ranked_tracks = sorted(
@@ -318,11 +345,17 @@ class HandStateStore:
                         {"label": c_label, "score": round(float(c_score), 4), "confidence": round(float(c_conf), 4)}
                         for c_label, c_score, c_conf in track.get("_candidates", [])[:3]
                     ],
+                    "consensus": {
+                        "support": int(track.get("_consensus", {}).get("support", 0)),
+                        "samples": int(track.get("_consensus", {}).get("samples", 0)),
+                        "ratio": round(float(track.get("_consensus", {}).get("ratio", 0.0)), 4),
+                    },
                 }
             )
 
         for track in self._tracks[camera_id]:
             track.pop("_candidates", None)
+            track.pop("_consensus", None)
 
         scored_cards.sort(key=lambda item: item[2], reverse=True)
         cards = [
@@ -332,6 +365,9 @@ class HandStateStore:
 
         self._debug[camera_id]["accepted_tracks"] = track_accepted
         self._debug[camera_id]["duplicate_labels_suppressed"] = duplicate_suppressed
+        self._debug[camera_id]["consensus_window_frames"] = int(self._consensus_window_frames)
+        self._debug[camera_id]["consensus_min_samples"] = int(self._consensus_min_samples)
+        self._debug[camera_id]["consensus_min_ratio"] = round(float(self._consensus_min_ratio), 4)
         self._debug[camera_id]["slots"] = slot_debug
 
         return HandState(
@@ -431,7 +467,8 @@ def _build_advisor_response(
             storage_metrics["recommendation_write_ms"] = round((time.time() - started) * 1000.0, 3)
         return out
 
-    best = select_recommendation(action_scores, compute_legal_actions(state, "me"))
+    legal_now = compute_legal_actions(state, "me")
+    best = select_recommendation(action_scores, legal_now)
     if best is None:
         out = AdvisorResponse(
             best_action=AdvisorBestAction(card="", ev=0.0, confidence=0.0),
@@ -448,7 +485,7 @@ def _build_advisor_response(
             storage_metrics["recommendation_write_ms"] = round((time.time() - started) * 1000.0, 3)
         return out
 
-    alternatives = [AdvisorAlternative(card=a.card, ev=a.total_ev) for a in action_scores[1:3]]
+    action_by_card = {str(a.card).upper(): a for a in action_scores}
     belief = belief_state.get("belief", {})
     belief_mass = sum(len(cards) for cards in belief.values())
 
@@ -460,18 +497,26 @@ def _build_advisor_response(
     if belief_mass == 0:
         uncertainty_notes.append("Belief state collapsed; hidden-card uncertainty high")
 
-    confidence = max(0.0, min(1.0, (1.0 - best.risk) * state.uncertainty.state_conf))
-    mode = "normal" if confidence >= 0.60 else "cautious"
+    confidence = max(0.0, min(1.0, float((1.0 - best.risk) * state.uncertainty.state_conf)))
+    forced_cautious = False
+
+    # If required camera roles are not bound, force cautious mode.
+    sessions = list(camera_sessions.get(game_id, {}).values())
+    bound_types = {str(s.camera_type or "").lower() for s in sessions}
+    required_types = {"hand", "table"}
+    missing = sorted(list(required_types - bound_types))
+    if missing:
+        forced_cautious = True
+        uncertainty_notes.append(f"Missing required camera bindings: {', '.join(missing)}")
 
     # If a bound camera has gone stale, force cautious mode.
     stale_threshold_ms = int(settings.camera_stale_threshold_ms)
-    sessions = list(camera_sessions.get(game_id, {}).values())
     now_ms = int(time.time() * 1000)
     stale_bound = [
         s for s in sessions if int(s.last_frame_ts_ms or 0) > 0 and (now_ms - int(s.last_frame_ts_ms or 0)) > stale_threshold_ms
     ]
     if stale_bound:
-        mode = "cautious"
+        forced_cautious = True
         uncertainty_notes.append("One or more bound cameras are stale")
 
     why, v2_notes = explain_recommendation(state, best, belief_state)
@@ -479,11 +524,62 @@ def _build_advisor_response(
     if state.turn.lead_suit:
         why.insert(0, f"Lead suit is {state.turn.lead_suit}; legal filtering applied")
 
+    llm_selected = False
+    llm_result = request_llm_recommendation(state, legal_now, action_scores, fallback_card=str(best.card))
+    if llm_result:
+        llm_best = action_by_card.get(str(llm_result.get("best_card", "")).upper())
+        if llm_best is not None:
+            best = llm_best
+            llm_selected = True
+
+            llm_why = [str(row).strip() for row in llm_result.get("why", []) if str(row).strip()]
+            if llm_why:
+                why = llm_why[:5]
+
+            llm_notes = [str(row).strip() for row in llm_result.get("uncertainty_notes", []) if str(row).strip()]
+            uncertainty_notes.extend(llm_notes[:4])
+
+            llm_conf = max(0.0, min(1.0, float(llm_result.get("confidence", 0.0))))
+            confidence = max(0.0, min(1.0, (0.65 * confidence) + (0.35 * llm_conf)))
+
+    if llm_advisor_enabled() and not llm_selected:
+        uncertainty_notes.append("LLM advisor unavailable; deterministic fallback used")
+
+    if llm_selected:
+        alt_cards = list(llm_result.get("alternatives", [])) if isinstance(llm_result, dict) else []
+        alternatives = [
+            AdvisorAlternative(card=row.card, ev=row.total_ev)
+            for row in [action_by_card.get(str(card).upper()) for card in alt_cards]
+            if row is not None and str(row.card).upper() != str(best.card).upper()
+        ]
+    else:
+        alternatives = []
+
+    if not alternatives:
+        alternatives = [
+            AdvisorAlternative(card=a.card, ev=a.total_ev)
+            for a in action_scores
+            if str(a.card).upper() != str(best.card).upper()
+        ][:2]
+
+    mode = "normal" if confidence >= 0.60 else "cautious"
+    if forced_cautious:
+        mode = "cautious"
+
+    seen_notes: set[str] = set()
+    deduped_uncertainty: list[str] = []
+    for note in uncertainty_notes:
+        item = str(note).strip()
+        if not item or item in seen_notes:
+            continue
+        seen_notes.add(item)
+        deduped_uncertainty.append(item)
+
     out = AdvisorResponse(
-        best_action=AdvisorBestAction(card=best.card, ev=best.total_ev, confidence=round(confidence, 4)),
+        best_action=AdvisorBestAction(card=best.card, ev=best.total_ev, confidence=round(float(confidence), 4)),
         alternatives=alternatives,
         why=why,
-        uncertainty_notes=uncertainty_notes[:8],
+        uncertainty_notes=deduped_uncertainty[:8],
         recommendation_mode=mode,
         freshness_ts_ms=state.updated_ts_ms,
         action_scores=action_scores,
@@ -574,6 +670,41 @@ def _require_bound_camera(game_id: str, camera_id: str, camera_type: str) -> Non
         raise HTTPException(status_code=403, detail="Camera must be bound to game before ingest")
     if str(session.camera_type) != str(camera_type):
         raise HTTPException(status_code=403, detail="Bound camera type mismatch")
+
+
+def _bound_camera_game_and_seat(camera_id: str) -> tuple[str, str]:
+    for game_id, sessions in camera_sessions.items():
+        session = sessions.get(camera_id)
+        if session is None:
+            continue
+        return game_id, str(session.seat_hint or "")
+    return "", ""
+
+
+def _card_tracking_sets(match_state) -> dict:
+    if match_state is None:
+        return {
+            "seen_cards": [],
+            "in_hand_cards": [],
+            "on_table_cards": [],
+            "won_pile_cards": [],
+            "unknown_cards": [],
+            "played_history_cards": [],
+        }
+    in_hand = sorted([card for card, entry in match_state.card_lifecycle.items() if str(entry.location) == "in_hand"])
+    on_table = sorted([card for card, entry in match_state.card_lifecycle.items() if str(entry.location) == "on_table"])
+    won_pile = sorted([card for card, entry in match_state.card_lifecycle.items() if str(entry.location) == "won_pile"])
+    unknown = sorted([card for card, entry in match_state.card_lifecycle.items() if str(entry.location) == "unknown"])
+    played = sorted({str(row.card) for row in match_state.played_history if str(row.card)})
+    seen = sorted(set(in_hand) | set(on_table) | set(won_pile) | set(unknown) | set(played))
+    return {
+        "seen_cards": seen,
+        "in_hand_cards": in_hand,
+        "on_table_cards": on_table,
+        "won_pile_cards": won_pile,
+        "unknown_cards": unknown,
+        "played_history_cards": played,
+    }
 
 
 async def consume_detections() -> None:
@@ -717,9 +848,11 @@ async def consume_detections() -> None:
                         source_worker=str(event.get("worker_name", "")),
                         source_model=str(event.get("model_name", "")),
                     )
-                    advice = build_thulla_advice(hand_state)
+                    rec_for_event = _build_advisor_response(parsed.game_id, persist=False, record_metrics=False)
+                    advice = build_hand_advice_from_recommendation(hand_state, rec_for_event)
                     event["hand_state"] = hand_state.model_dump()
                     event["advice"] = advice.model_dump()
+                    event["recommendation"] = rec_for_event.model_dump()
                     event["hand_debug"] = hand_state_store.debug(parsed.camera_id)
                     event["fusion_debug"] = fused.get("fusion_debug", {})
                     event["game_state"] = game_state.model_dump()
@@ -743,7 +876,6 @@ async def consume_detections() -> None:
                         )
                         storage_metrics["event_write_ms"] = round((time.time() - started) * 1000.0, 3)
                         if bool(settings.persist_recommendation_on_transition):
-                            rec = _build_advisor_response(parsed.game_id, persist=False, record_metrics=False)
                             started = time.time()
                             event_store.log_transition_and_recommendation(
                                 parsed.game_id,
@@ -757,7 +889,7 @@ async def consume_detections() -> None:
                                     "transition_id": str(game_state.last_transition_id),
                                     "state": game_state.model_dump(),
                                 },
-                                rec.model_dump(),
+                                rec_for_event.model_dump(),
                             )
                             storage_metrics["transition_write_ms"] = round((time.time() - started) * 1000.0, 3)
                         else:
@@ -844,6 +976,16 @@ async def lifespan(_: FastAPI):
     if str(settings.deploy_env).lower() in {"prod", "production"} and bool(settings.auth_prod_secret_required):
         if (not settings.jwt_private_key_pem) and str(settings.jwt_hs256_secret).strip() == "dev-secret-change-me":
             raise RuntimeError("Refusing startup in production with default JWT secret")
+
+    if bool(settings.auth_enabled) and bool(settings.auth_strict_iss_aud) and str(settings.deploy_env).lower() in {"prod", "production"}:
+        if not str(settings.jwt_issuer or "").strip() or not str(settings.jwt_audience or "").strip():
+            raise RuntimeError("Strict auth in production requires JWT_ISSUER and JWT_AUDIENCE")
+
+    advisor_mode = str(settings.advisor_mode or "rules").strip().lower()
+    llm_mode_requested = advisor_mode in {"llm", "hybrid"} and bool(settings.llm_enabled)
+    if llm_mode_requested and not str(settings.llm_api_key or "").strip():
+        raise RuntimeError("LLM mode is enabled but LLM_API_KEY is missing")
+
     try:
         yield
     finally:
@@ -871,7 +1013,19 @@ app.add_middleware(
 @app.get("/api/health")
 async def health() -> dict:
     pong = await redis_client.ping()
-    return {"ok": True, "redis": pong}
+    advisor_mode = str(settings.advisor_mode or "rules").strip().lower()
+    llm_mode_requested = advisor_mode in {"llm", "hybrid"} and bool(settings.llm_enabled)
+    return {
+        "ok": True,
+        "redis": pong,
+        "llm": {
+            "mode": advisor_mode,
+            "enabled": llm_mode_requested,
+            "ready": bool(llm_advisor_enabled()),
+            "provider_base": str(settings.llm_api_base),
+            "model": str(settings.llm_model),
+        },
+    }
 
 
 @app.get("/api/workers/status")
@@ -1159,6 +1313,10 @@ async def auth_assign_role(
 
 @app.post("/api/games/{game_id}/cameras/bind")
 async def bind_camera_session(game_id: str, body: CameraBindIn, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+    camera_key = f"camera:{body.camera_id}"
+    if not await redis_client.exists(camera_key):
+        raise HTTPException(status_code=400, detail="Camera not registered. Call /api/cameras/register first")
+
     session = CameraSessionState(
         game_id=game_id,
         camera_id=body.camera_id,
@@ -1262,15 +1420,7 @@ async def latest_hands() -> dict:
 
 @app.get("/api/hands/{camera_id}")
 async def latest_hand(camera_id: str) -> dict:
-    bound_game_id = ""
-    seat_hint = ""
-    for game_id, sessions in camera_sessions.items():
-        session = sessions.get(camera_id)
-        if session is None:
-            continue
-        bound_game_id = game_id
-        seat_hint = str(session.seat_hint or "")
-        break
+    bound_game_id, seat_hint = _bound_camera_game_and_seat(camera_id)
 
     if bound_game_id and seat_hint:
         projected = match_engine.project_hand_state_for_camera(bound_game_id, camera_id, seat_hint)
@@ -1294,8 +1444,13 @@ async def latest_hand(camera_id: str) -> dict:
 @app.get("/api/hands/{camera_id}/advice")
 async def hand_advice(camera_id: str) -> dict:
     hand = hand_state_store.latest(camera_id)
-    advice: HandAdvice = build_thulla_advice(hand)
-    return {"advice": advice.model_dump(), "hand": hand.model_dump()}
+    bound_game_id, _ = _bound_camera_game_and_seat(camera_id)
+    if bound_game_id:
+        rec = _build_advisor_response(bound_game_id)
+        advice: HandAdvice = build_hand_advice_from_recommendation(hand, rec)
+        return {"advice": advice.model_dump(), "hand": hand.model_dump(), "game_id": bound_game_id}
+    advice = build_basic_hand_advice(hand)
+    return {"advice": advice.model_dump(), "hand": hand.model_dump(), "game_id": ""}
 
 
 @app.post("/api/games/start")
@@ -1405,6 +1560,7 @@ async def end_game(game_id: str, _claims: dict = Depends(require_auth_roles({set
 async def get_game_state(game_id: str) -> dict:
     state = game_state_engine.get(game_id)
     match_state = match_engine.get(game_id)
+    card_sets = _card_tracking_sets(match_state)
     return {
         "state": state.model_dump(),
         "match_state": match_state.model_dump() if match_state else None,
@@ -1413,6 +1569,7 @@ async def get_game_state(game_id: str) -> dict:
         },
         "hand_cards_by_seat": (match_state.hand_cards_by_seat if match_state else {}),
         "card_lifecycle": ({k: v.model_dump() for k, v in match_state.card_lifecycle.items()} if match_state else {}),
+        "card_tracking_sets": card_sets,
     }
 
 
@@ -1498,6 +1655,7 @@ async def game_diagnostics(game_id: str) -> dict:
         "belief_metrics": belief_diagnostics(belief),
         "calibration": fusion_engine.get_table_calibration(game_id),
         "camera_sessions": [s.model_dump() for s in camera_sessions.get(game_id, {}).values()],
+        "card_tracking_sets": _card_tracking_sets(match_state),
         "card_lifecycle_summary": {
             "tracked_cards": len((match_state.card_lifecycle if match_state else {})),
         },
@@ -1510,7 +1668,7 @@ async def game_diagnostics(game_id: str) -> dict:
 
 
 @app.get("/api/games/{game_id}/setup/diagnostics")
-async def game_setup_diagnostics(game_id: str, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
+async def game_setup_diagnostics(game_id: str) -> dict:
     sessions = [s.model_dump() for s in camera_sessions.get(game_id, {}).values()]
     now = int(time.time() * 1000)
     stale = [
@@ -1558,7 +1716,12 @@ async def replay_game(game_id: str, speed_multiplier: float = 1.0, limit: int = 
 @app.post("/api/hands/{camera_id}/override")
 async def set_hand_override(camera_id: str, body: HandOverrideIn, _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name}))) -> dict:
     hand = hand_state_store.set_override(camera_id, body.cards)
-    advice: HandAdvice = build_thulla_advice(hand)
+    bound_game_id, _ = _bound_camera_game_and_seat(camera_id)
+    if bound_game_id:
+        rec = _build_advisor_response(bound_game_id, persist=False)
+        advice = build_hand_advice_from_recommendation(hand, rec)
+    else:
+        advice = build_basic_hand_advice(hand)
     event = {
         "camera_id": camera_id,
         "ts_ms": hand.updated_ts_ms,
@@ -1602,6 +1765,13 @@ async def detections_ws(ws: WebSocket):
         await ws.close(code=4401)
         return
     await hub.connect(ws)
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(25)
+            await ws.send_json({"type": "ping", "ts_ms": int(time.time() * 1000)})
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
     try:
         warmup = await hub.latest()
         for event in warmup:
@@ -1612,6 +1782,9 @@ async def detections_ws(ws: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
         await hub.disconnect(ws)
 
 
