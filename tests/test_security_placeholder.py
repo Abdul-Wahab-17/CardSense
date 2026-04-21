@@ -10,9 +10,9 @@ def test_security_extract_roles_from_claims():
     assert "read" in roles
 
 
-def test_security_ws_missing_token_rejected_when_auth_enabled(monkeypatch):
+def test_security_ws_missing_token_allowed_as_anonymous_when_auth_enabled(monkeypatch):
     from backend.app import security as sec
 
     monkeypatch.setattr(sec.settings, "auth_enabled", 1)
-    with pytest.raises(Exception):
-        ws_validate_token(None)
+    claims = ws_validate_token(None)
+    assert claims.get("sub") == "anonymous"
