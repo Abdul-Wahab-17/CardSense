@@ -32,15 +32,46 @@ function formatClock(tsMs) {
   return new Date(Number(tsMs)).toLocaleTimeString();
 }
 
+function normalizeBackendBase(raw) {
+  const value = String(raw || "").trim();
+  if (!value) {
+    return "";
+  }
+  const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(value);
+  const candidate = hasScheme ? value : `${location.protocol}//${value}`;
+  try {
+    const parsed = new URL(candidate);
+    if (!parsed.hostname) {
+      return "";
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch (_) {
+    return "";
+  }
+}
+
 function backendHttpBase() {
   const queryBase = new URLSearchParams(location.search).get("backend") || "";
   const savedBase = localStorage.getItem("cardsense_backend_base") || "";
-  const configuredBase = (queryBase || savedBase).trim();
-  if (configuredBase) {
-    const normalized = configuredBase.replace(/\/$/, "");
-    localStorage.setItem("cardsense_backend_base", normalized);
-    return normalized;
+
+  const normalizedQuery = normalizeBackendBase(queryBase);
+  if (normalizedQuery) {
+    localStorage.setItem("cardsense_backend_base", normalizedQuery);
+    return normalizedQuery;
   }
+
+  const normalizedSaved = normalizeBackendBase(savedBase);
+  if (normalizedSaved) {
+    if (normalizedSaved !== savedBase) {
+      localStorage.setItem("cardsense_backend_base", normalizedSaved);
+    }
+    return normalizedSaved;
+  }
+
+  if (savedBase) {
+    localStorage.removeItem("cardsense_backend_base");
+  }
+
   const protocol = location.protocol || "http:";
   const host = location.hostname || "localhost";
   if (String(location.port || "") === "8080") {
@@ -50,10 +81,15 @@ function backendHttpBase() {
 }
 
 function backendWsBase() {
-  const httpBase = backendHttpBase();
-  const parsed = new URL(httpBase);
-  const wsProtocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-  return `${wsProtocol}//${parsed.host}`;
+  const httpBase = normalizeBackendBase(backendHttpBase()) || `${location.protocol}//${location.host}`;
+  try {
+    const parsed = new URL(httpBase);
+    const wsProtocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProtocol}//${parsed.host}`;
+  } catch (_) {
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProtocol}//${location.host}`;
+  }
 }
 
 function backendUrl(path) {
@@ -393,15 +429,7 @@ function App() {
 
     const connectWebSocket = () => {
       if (cancelled) return;
-      const token = accessTokenRef.current;
-      if (!token) {
-        setWsConnected(false);
-        setLastError("Login required for realtime updates.");
-        return;
-      }
-
-      const tokenParam = `?token=${encodeURIComponent(token)}`;
-      const ws = new WebSocket(`${backendWsBase()}/ws/detections${tokenParam}`);
+      const ws = new WebSocket(`${backendWsBase()}/ws/detections`);
       wsRef.current = ws;
 
       ws.onmessage = (msg) => {
@@ -436,11 +464,6 @@ function App() {
         setLastError(`WebSocket closed: ${code}${suffix}`);
         if (cancelled) {
           return;
-        }
-        if (code === 4401 && refreshTokenRef.current) {
-          try {
-            await refreshAccessToken();
-          } catch (_) {}
         }
         scheduleReconnect();
       };

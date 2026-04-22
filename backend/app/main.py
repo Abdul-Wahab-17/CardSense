@@ -1762,8 +1762,8 @@ async def detections_ws(ws: WebSocket):
     try:
         ws_validate_token(token)
     except HTTPException:
-        await ws.close(code=4401)
-        return
+        # Keep UI stream stable even if a stale/invalid token is present.
+        pass
     await hub.connect(ws)
 
     async def _heartbeat() -> None:
