@@ -63,6 +63,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
+    gpus: all
     env_file:
       - .env
     environment:
@@ -85,6 +86,7 @@ services:
       WORKER_HEARTBEAT_SEC: ${WORKER_HEARTBEAT_SEC:-5}
       MODEL_SMOKE_TEST_URLS: ${MODEL_SMOKE_TEST_URLS:-}
       MODEL_SMOKE_MIN_DETECTIONS: ${MODEL_SMOKE_MIN_DETECTIONS:-1}
+      YOLO_DEVICE: ${YOLO_DEVICE:-0}
       DATABASE_URL: ${DATABASE_URL:-}
     volumes:
       - ./models:/app/models
