@@ -51,6 +51,10 @@ DEBUG_CONF = float(os.getenv("DEBUG_CONF", "0.01"))
 CALIBRATION_TEMPERATURE = float(os.getenv("CALIBRATION_TEMPERATURE", "1.0"))
 MAX_FRAME_AGE_MS = int(os.getenv("MAX_FRAME_AGE_MS", "2500"))
 SLOW_ACCURATE_MODE = os.getenv("SLOW_ACCURATE_MODE", "1") == "1"
+YOLO_DEVICE = os.getenv("YOLO_DEVICE", "").strip()
+FAST_IMGSZ = int(os.getenv("FAST_IMGSZ", "640"))
+ACCURATE_IMGSZ = int(os.getenv("ACCURATE_IMGSZ", "1280"))
+ENABLE_DEBUG_PROBE = os.getenv("ENABLE_DEBUG_PROBE", "0") == "1"
 WORKER_LOG_STREAM = os.getenv("WORKER_LOG_STREAM", "worker_logs")
 WORKER_STATUS_PREFIX = os.getenv("WORKER_STATUS_PREFIX", "worker:status")
 WORKER_HEARTBEAT_SEC = int(os.getenv("WORKER_HEARTBEAT_SEC", "5"))
@@ -75,15 +79,18 @@ WORKER_SUPPORTS_TABLE = os.getenv("WORKER_SUPPORTS_TABLE", "1") == "1"
 
 
 def infer(model: YOLO, image, conf: float):
-    return model.predict(
-        source=image,
-        conf=conf,
-        imgsz=1280 if SLOW_ACCURATE_MODE else 960,
-        augment=SLOW_ACCURATE_MODE,
-        agnostic_nms=SLOW_ACCURATE_MODE,
-        max_det=100,
-        verbose=False,
-    )[0]
+    kwargs = {
+        "source": image,
+        "conf": conf,
+        "imgsz": ACCURATE_IMGSZ if SLOW_ACCURATE_MODE else FAST_IMGSZ,
+        "augment": SLOW_ACCURATE_MODE,
+        "agnostic_nms": SLOW_ACCURATE_MODE,
+        "max_det": 100,
+        "verbose": False,
+    }
+    if YOLO_DEVICE:
+        kwargs["device"] = YOLO_DEVICE
+    return model.predict(**kwargs)[0]
 
 
 def ensure_group(r: redis.Redis, stream: str, group: str) -> None:
@@ -418,15 +425,19 @@ def _cluster_and_rank_detections(raw_detections: list[dict], iou_threshold: floa
 
 def predict_with_fallback(model: YOLO, image, conf: float):
     height, width = image.shape[:2]
-    upscaled = cv2.resize(image, (width * 2, height * 2), interpolation=cv2.INTER_CUBIC)
     pass_stats = []
-    passes = [
-        (0, image, 1.0),
-        (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE), 0.92),
-        (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE), 0.92),
-        (180, cv2.rotate(image, cv2.ROTATE_180), 0.90),
-        (0, upscaled, 0.95),
-    ]
+    if SLOW_ACCURATE_MODE:
+        upscaled = cv2.resize(image, (width * 2, height * 2), interpolation=cv2.INTER_CUBIC)
+        passes = [
+            (0, image, 1.0),
+            (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE), 0.92),
+            (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE), 0.92),
+            (180, cv2.rotate(image, cv2.ROTATE_180), 0.90),
+            (0, upscaled, 0.95),
+        ]
+    else:
+        # Low-latency mode: run a single pass and avoid expensive rotation/scale fallbacks.
+        passes = [(0, image, 1.0)]
 
     aggregated_raw: list[dict] = []
 
@@ -482,6 +493,14 @@ def predict_with_fallback(model: YOLO, image, conf: float):
                 "passes": pass_stats,
                 "fused_count": len(fused),
             }
+
+    if not ENABLE_DEBUG_PROBE:
+        return [], {
+            "selected_pass": None,
+            "passes": pass_stats,
+            "probe_skipped": True,
+            "probe_reason": "disabled",
+        }
 
     probe_result = infer(model, image, DEBUG_CONF)
     probe_detections = extract_detections(probe_result, 0, width, height)
@@ -645,13 +664,27 @@ def run_worker(consumer_name: str) -> None:
     push_worker_log(r, "INFO", consumer_name, "worker_ready")
 
     while True:
-        response = r.xreadgroup(
-            groupname=FRAME_GROUP,
-            consumername=consumer_name,
-            streams={FRAME_STREAM: ">"},
-            count=64,
-            block=1000,
-        )
+        try:
+            response = r.xreadgroup(
+                groupname=FRAME_GROUP,
+                consumername=consumer_name,
+                streams={FRAME_STREAM: ">"},
+                count=64,
+                block=1000,
+            )
+        except redis.exceptions.ResponseError as exc:
+            if "NOGROUP" in str(exc):
+                ensure_group(r, FRAME_STREAM, FRAME_GROUP)
+                push_worker_log(
+                    r,
+                    "WARN",
+                    consumer_name,
+                    "consumer_group_recreated",
+                    stream=FRAME_STREAM,
+                    group=FRAME_GROUP,
+                )
+                continue
+            raise
 
         if not response:
             if (time.time() - last_heartbeat) >= WORKER_HEARTBEAT_SEC:
