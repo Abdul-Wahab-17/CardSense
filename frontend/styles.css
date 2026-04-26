@@ -218,6 +218,7 @@ button:disabled {
 .btn {
   font-weight: 600;
   min-width: 108px;
+  min-height: 44px;
 }
 
 .btn-primary {
@@ -465,6 +466,34 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+.setup-alert-block {
+  border: 1px solid #6f5930;
+  background: linear-gradient(180deg, #332714, #2a2113);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.warning-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: #ffe7b7;
+}
+
+.warning-list li {
+  margin: 6px 0;
+}
+
+.mobile-hint {
+  margin-top: 8px;
+  border: 1px solid #3f6754;
+  background: #163327;
+  border-radius: 10px;
+  padding: 10px;
+  color: #d7f3e4;
+  font-size: 13px;
+}
+
 .sub-debug {
   margin-top: 12px;
 }
@@ -493,7 +522,7 @@ pre {
 
 @media (max-width: 767px) {
   .app-shell {
-    padding: 14px 12px 72px;
+    padding: 14px 12px calc(72px + env(safe-area-inset-bottom));
   }
 
   h1 {
@@ -529,5 +558,23 @@ pre {
     background: rgba(15, 38, 29, 0.96);
     color: var(--text);
     backdrop-filter: blur(4px);
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font-size: 16px;
+    min-height: 46px;
+  }
+
+  .status-chip,
+  .badge {
+    font-size: 13px;
+  }
+
+  .video-preview {
+    max-height: 42vh;
+    min-height: 210px;
   }
 }

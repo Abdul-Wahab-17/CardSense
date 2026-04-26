@@ -1,0 +1,28 @@
+so the target here is that we want an app that basically helps you play card games 
+
+what we are gonna do here is three things 
+-> CV (detect cards using two cameras and parallel processing)
+-> Do manual computation to decide the exact cards in hand and on table 
+-> Use an LLM API (for now) an our own fine tuned LLM (for later) to make predictions or suggestions about the game 
+
+now the way we wanna do things kinda goes something like this:
+
+-> first you need to signup and make an account on the app
+-> then you need to log in to the app using two devices, both must have a camera 
+-> once two cameras are registered, you will put one somewhere it can see the table cards and the other somewhere it can see the cards in your hand 
+-> there is no restriction on the amount of logins but the no of cameras allowed to be registered is two 
+-> one both are registered they will start making predictions that will be shown on the dashboard, here only the CV predictions are being made
+-> afterwards these predictions are sent out to the LLM to get suggestions in the game
+-> (POSSIBLE ADDITION: tipsi, the LLM also teaches you how to play better and what mistakes you made)
+
+-> this project is also for PDC so we need a way to deploy the models on multiple machines and do parallel processing on those
+
+
+what is done so far
+
+-> basically we got a cards detection model online, doesnt detect much but works for now
+-> LLM api is deepseek tho i am yet to test it 
+-> the login part etc needs to be fine tuned 
+
+
+

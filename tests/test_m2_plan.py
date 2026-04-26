@@ -1,7 +1,17 @@
+import asyncio
+
+import pytest
+from fastapi import HTTPException
+
 from backend.app.auth_store import AuthStore
-from backend.app.main import select_worker_route
+from backend.app.main import (
+    _validate_camera_bind_request,
+    auth_register,
+    camera_sessions,
+    select_worker_route,
+)
 from backend.app.match_engine import MatchEngine
-from backend.app.models import CameraBindIn, FrameIn, RoundStartIn, VariantConfig
+from backend.app.models import AuthRegisterIn, CameraBindIn, CameraSessionState, FrameIn, RoundStartIn, VariantConfig
 
 
 def test_auth_store_register_login_rotate(tmp_path):
@@ -57,3 +67,32 @@ def test_camera_bind_schema_and_route_selector():
     assert bind.camera_type == "table"
     route = select_worker_route("table", "table", [{"supports_table": True}])
     assert route == "route:table"
+
+
+def test_auth_register_duplicate_email_returns_409(tmp_path, monkeypatch):
+    from backend.app import main as main_mod
+
+    store = AuthStore(str(tmp_path / "auth-main.db"))
+    monkeypatch.setattr(main_mod, "auth_store", store)
+
+    result = asyncio.run(auth_register(AuthRegisterIn(email="dup@example.com", password="password123", display_name="Dup")))
+    assert result["ok"]
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(auth_register(AuthRegisterIn(email="dup@example.com", password="password123", display_name="Dup2")))
+    assert exc.value.status_code == 409
+
+
+def test_camera_binding_enforces_max_two_and_unique_type():
+    game_id = "g-bind"
+    camera_sessions.pop(game_id, None)
+    try:
+        camera_sessions[game_id]["cam-hand"] = CameraSessionState(game_id=game_id, camera_id="cam-hand", camera_type="hand")
+        _validate_camera_bind_request(game_id, "cam-table", "table")
+
+        camera_sessions[game_id]["cam-table"] = CameraSessionState(game_id=game_id, camera_id="cam-table", camera_type="table")
+
+        with pytest.raises(HTTPException):
+            _validate_camera_bind_request(game_id, "cam-extra", "hand")
+    finally:
+        camera_sessions.pop(game_id, None)

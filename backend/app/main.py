@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
@@ -662,6 +663,21 @@ def _touch_camera_session(game_id: str, camera_id: str, ts_ms: int) -> None:
     session.latency_ms_p95 = round(max(float(session.latency_ms_p95) * 0.90, float(latency_ms)), 3)
 
 
+def _validate_camera_bind_request(game_id: str, camera_id: str, camera_type: str) -> None:
+    sessions = camera_sessions.get(game_id, {})
+    existing = sessions.get(camera_id)
+    requested_type = str(camera_type or "").strip().lower()
+
+    if existing is None and len(sessions) >= 2:
+        raise HTTPException(status_code=400, detail="A game can bind at most two cameras")
+
+    for existing_camera_id, session in sessions.items():
+        if existing_camera_id == camera_id:
+            continue
+        if str(session.camera_type or "").strip().lower() == requested_type:
+            raise HTTPException(status_code=400, detail=f"Only one {requested_type} camera can be bound per game")
+
+
 def _require_bound_camera(game_id: str, camera_id: str, camera_type: str) -> None:
     if not bool(settings.feature_enforce_camera_binding):
         return
@@ -1018,6 +1034,9 @@ async def health() -> dict:
     return {
         "ok": True,
         "redis": pong,
+        "ingest": {
+            "frame_ingest_rate_limit_fps": float(settings.frame_ingest_rate_limit_fps),
+        },
         "llm": {
             "mode": advisor_mode,
             "enabled": llm_mode_requested,
@@ -1213,7 +1232,10 @@ async def register_camera(body: CameraRegister, _claims: dict = Depends(require_
 
 @app.post("/api/auth/register")
 async def auth_register(body: AuthRegisterIn) -> dict:
-    created = auth_store.create_user_account(body.email, body.password, body.display_name)
+    try:
+        created = auth_store.create_user_account(body.email, body.password, body.display_name)
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="Email already registered")
     return {"ok": True, **created}
 
 
@@ -1316,6 +1338,8 @@ async def bind_camera_session(game_id: str, body: CameraBindIn, _claims: dict = 
     camera_key = f"camera:{body.camera_id}"
     if not await redis_client.exists(camera_key):
         raise HTTPException(status_code=400, detail="Camera not registered. Call /api/cameras/register first")
+
+    _validate_camera_bind_request(game_id, body.camera_id, body.camera_type)
 
     session = CameraSessionState(
         game_id=game_id,
@@ -1671,18 +1695,24 @@ async def game_diagnostics(game_id: str) -> dict:
 async def game_setup_diagnostics(game_id: str) -> dict:
     sessions = [s.model_dump() for s in camera_sessions.get(game_id, {}).values()]
     now = int(time.time() * 1000)
+    bound_types = sorted({str(row.get("camera_type", "")).strip().lower() for row in sessions if row.get("camera_type")})
+    required_types = {"hand", "table"}
+    missing_types = sorted(list(required_types - set(bound_types)))
     stale = [
         row
         for row in sessions
         if int(row.get("last_frame_ts_ms", 0) or 0) > 0
         and (now - int(row.get("last_frame_ts_ms", 0))) > int(settings.camera_stale_threshold_ms)
     ]
-    readiness = "ready" if len(sessions) >= 2 and not stale else "degraded"
+    readiness = "ready" if len(sessions) == 2 and not missing_types and not stale else "degraded"
     return {
         "ok": True,
         "game_id": game_id,
         "readiness": readiness,
         "required_camera_count": 2,
+        "required_camera_types": ["hand", "table"],
+        "bound_camera_types": bound_types,
+        "missing_camera_types": missing_types,
         "bound_camera_count": len(sessions),
         "stale_camera_count": len(stale),
         "stale_camera_ids": [s.get("camera_id", "") for s in stale],

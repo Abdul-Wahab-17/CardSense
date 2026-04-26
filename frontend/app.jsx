@@ -99,6 +99,85 @@ function backendUrl(path) {
   return `${backendHttpBase()}${suffix}`;
 }
 
+async function readApiError(res, fallback = "Request failed") {
+  let text = "";
+  try {
+    text = String(await res.text());
+  } catch (_) {
+    return fallback;
+  }
+
+  if (!text) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.detail === "string" && parsed.detail.trim()) {
+      return parsed.detail.trim();
+    }
+  } catch (_) {}
+
+  return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+}
+
+function friendlyIngestError(message) {
+  const raw = String(message || "").trim();
+  const lower = raw.toLowerCase();
+  if (!raw) return "Frame upload failed.";
+  if (lower.includes("camera must be bound to game before ingest")) {
+    return "This camera is not bound to the selected game. Register and bind both hand and table cameras first.";
+  }
+  if (lower.includes("bound camera type mismatch")) {
+    return "Camera type mismatch. Make sure the stream camera type matches the type used during bind.";
+  }
+  if (lower.includes("frame ingest rate limit exceeded")) {
+    return "Frame rate too high for ingest limits. Reduce FPS or wait briefly.";
+  }
+  if (lower.includes("not authenticated") || lower.includes("invalid token") || lower.includes("permission denied")) {
+    return "Login required for frame upload. Sign in again and retry.";
+  }
+  return raw;
+}
+
+function mediaApiUnavailableReason() {
+  const secure = Boolean(window.isSecureContext);
+  const protocol = String(location.protocol || "").toLowerCase();
+  const host = String(location.hostname || "").toLowerCase();
+  const isLocalhost = host === "localhost" || host === "127.0.0.1" || host === "::1";
+
+  if (!secure || (protocol !== "https:" && !isLocalhost)) {
+    return "Camera APIs are blocked because this page is not running in a secure context. Open the app over HTTPS (or localhost).";
+  }
+
+  return "This browser does not expose camera APIs on this page.";
+}
+
+function getLegacyGetUserMedia() {
+  return (
+    navigator.getUserMedia
+    || navigator.webkitGetUserMedia
+    || navigator.mozGetUserMedia
+    || navigator.msGetUserMedia
+    || null
+  );
+}
+
+async function requestUserMedia(constraints) {
+  if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
+    return navigator.mediaDevices.getUserMedia(constraints);
+  }
+
+  const legacy = getLegacyGetUserMedia();
+  if (legacy) {
+    return new Promise((resolve, reject) => {
+      legacy.call(navigator, constraints, resolve, reject);
+    });
+  }
+
+  throw new Error(mediaApiUnavailableReason());
+}
+
 function App() {
   const [gameId, setGameId] = useState("default-game");
   const [cameraId, setCameraId] = useState("cam-1");
@@ -111,6 +190,7 @@ function App() {
   const [streamStatus, setStreamStatus] = useState("Register camera then start webcam stream.");
   const [fps, setFps] = useState(2);
   const [batchSize, setBatchSize] = useState(1);
+  const [backendIngestFpsLimit, setBackendIngestFpsLimit] = useState(null);
   const [events, setEvents] = useState([]);
   const [hand, setHand] = useState(null);
   const [advice, setAdvice] = useState(null);
@@ -151,6 +231,11 @@ function App() {
   const refreshTokenRef = useRef(refreshToken);
   const frameBatchRef = useRef([]);
   const captureCanvasRef = useRef(document.createElement("canvas"));
+  const uploadMinIntervalRef = useRef(0);
+  const uploadBaseIntervalRef = useRef(0);
+  const lastUploadTsRef = useRef(0);
+  const rateLimitCooldownUntilRef = useRef(0);
+  const boundCameraTypeRef = useRef("");
 
   const handCards = useMemo(() => hand?.cards || [], [hand]);
   const handMaxCards = useMemo(() => {
@@ -203,6 +288,78 @@ function App() {
   }, [recommendation, lastEventAt, events]);
 
   const lowConfidence = Number(bestAction?.confidence ?? 0) < 0.55;
+  const isMobileBrowser = useMemo(() => {
+    const ua = String(navigator.userAgent || "");
+    return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || window.matchMedia("(max-width: 767px)").matches;
+  }, []);
+
+  const setupWarnings = useMemo(() => {
+    const warnings = [];
+    const pushUnique = (text) => {
+      const msg = String(text || "").trim();
+      if (!msg) return;
+      if (!warnings.includes(msg)) warnings.push(msg);
+    };
+
+    if (!accessToken) {
+      pushUnique("Login required before registering cameras and sending frames.");
+    }
+
+    if (!backendOk) {
+      pushUnique("Backend is offline. Start backend service and verify the backend URL.");
+    }
+
+    if (backendOk && !wsConnected) {
+      pushUnique("Realtime socket is disconnected. Live detections and updates may be delayed.");
+    }
+
+    if (setupDiagnostics?.detail) {
+      pushUnique(setupDiagnostics.detail);
+    }
+
+    const requiredCount = Number(setupDiagnostics?.required_camera_count || 2);
+    const boundCount = Number(setupDiagnostics?.bound_camera_count || 0);
+    if (boundCount <= 0) {
+      pushUnique(`No camera is bound for this game yet. Bind ${requiredCount} cameras (hand + table).`);
+    } else if (boundCount < requiredCount) {
+      pushUnique(`Setup in progress: ${boundCount}/${requiredCount} cameras are bound. Bind the second camera to complete dual-camera mode.`);
+    }
+
+    const missingTypes = Array.isArray(setupDiagnostics?.missing_camera_types)
+      ? setupDiagnostics.missing_camera_types.filter(Boolean)
+      : [];
+    if (missingTypes.length > 0 && boundCount > 0 && boundCount >= requiredCount) {
+      pushUnique(`Missing required camera roles: ${missingTypes.join(", ")}.`);
+    }
+
+    const staleIds = Array.isArray(setupDiagnostics?.stale_camera_ids)
+      ? setupDiagnostics.stale_camera_ids.filter(Boolean)
+      : [];
+    if (staleIds.length > 0) {
+      pushUnique(`Stale camera stream detected: ${staleIds.join(", ")}. Restart stream on those devices.`);
+    }
+
+    if (isStreaming && !lastEventAt) {
+      pushUnique("Streaming started but no detection events received yet. Check worker status and camera framing.");
+    }
+
+    const now = Date.now();
+    const mismatchOrRateLimited = /camera type mismatch|rate limit/i.test(String(lastError || ""));
+    if (isStreaming && framesSent >= 4 && lastEventAt && (now - lastEventAt) > 20000 && !mismatchOrRateLimited) {
+      pushUnique("No fresh detections for over 15s while streaming. Worker may be stalled or camera feed is blocked.");
+    }
+
+    if (lastError) {
+      pushUnique(lastError);
+    }
+
+    const mediaApiMissing = !navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function";
+    if (isMobileBrowser && mediaApiMissing) {
+      pushUnique(mediaApiUnavailableReason());
+    }
+
+    return warnings;
+  }, [accessToken, backendOk, framesSent, isMobileBrowser, isStreaming, lastError, lastEventAt, setupDiagnostics, wsConnected]);
 
   const legalPlays = Array.isArray(recommendation?.action_scores)
     ? recommendation.action_scores.length
@@ -348,7 +505,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ camera_id: cameraId.trim(), source: cameraSource.trim() }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await readApiError(res, "Camera registration failed"));
       const gid = gameId.trim() || "default-game";
       const bindRes = await apiFetch(`/api/games/${encodeURIComponent(gid)}/cameras/bind`, {
         method: "POST",
@@ -361,11 +518,41 @@ function App() {
           stream_profile: "balanced",
         }),
       });
-      if (!bindRes.ok) throw new Error(await bindRes.text());
+      if (!bindRes.ok) throw new Error(await readApiError(bindRes, "Camera bind failed"));
+      boundCameraTypeRef.current = String(cameraType || "").trim().toLowerCase();
       setRegisterStatus(`Registered and bound ${cameraId.trim()}`);
     } catch (err) {
       setRegisterStatus(`Registration failed: ${err}`);
     }
+  }
+
+  async function fetchCameraSessionsForGame(gid) {
+    if (!accessTokenRef.current) {
+      return [];
+    }
+    const res = await apiFetch(`/api/games/${encodeURIComponent(gid)}/cameras`, { retry401: false });
+    if (!res.ok) {
+      return [];
+    }
+    const payload = await res.json();
+    return Array.isArray(payload?.camera_sessions) ? payload.camera_sessions : [];
+  }
+
+  async function syncBoundCameraType(gid, camId) {
+    const sessions = await fetchCameraSessionsForGame(gid);
+    const row = sessions.find((item) => String(item?.camera_id || "") === String(camId || ""));
+    if (!row) {
+      boundCameraTypeRef.current = "";
+      return null;
+    }
+    const boundType = String(row.camera_type || "").trim().toLowerCase();
+    if (boundType) {
+      boundCameraTypeRef.current = boundType;
+      if (boundType !== String(cameraType || "").trim().toLowerCase()) {
+        setCameraType(boundType);
+      }
+    }
+    return row;
   }
 
   async function loadInitialData() {
@@ -490,6 +677,12 @@ function App() {
         if (!res.ok) throw new Error();
         const body = await res.json();
         setBackendOk(Boolean(body?.ok));
+        const ingestLimit = Number(body?.ingest?.frame_ingest_rate_limit_fps || 0);
+        const safeLimit = ingestLimit > 0 ? ingestLimit : null;
+        setBackendIngestFpsLimit(safeLimit);
+        if (safeLimit && Number(fps) > safeLimit) {
+          setFps(Math.max(1, Math.floor(safeLimit)));
+        }
       } catch (_) {
         setBackendOk(false);
       }
@@ -562,7 +755,27 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const apiErr = await readApiError(res, "Frame ingest failed");
+        const friendly = friendlyIngestError(apiErr);
+        if (/rate limit/i.test(friendly)) {
+          const now = Date.now();
+          rateLimitCooldownUntilRef.current = now + 1400;
+          uploadMinIntervalRef.current = Math.min(1500, Math.max(uploadMinIntervalRef.current + 120, uploadBaseIntervalRef.current || 250));
+          throw new Error(`${friendly} Auto-throttling stream now.`);
+        }
+        if (/camera type mismatch/i.test(friendly)) {
+          const gid = gameId.trim() || "default-game";
+          const camId = cameraId.trim();
+          await syncBoundCameraType(gid, camId);
+        }
+        throw new Error(friendly);
+      }
+
+      // Gradually recover after successful sends while preserving backend safety.
+      if (uploadMinIntervalRef.current > uploadBaseIntervalRef.current) {
+        uploadMinIntervalRef.current = Math.max(uploadBaseIntervalRef.current, uploadMinIntervalRef.current - 30);
+      }
     } finally {
       frameBatchRef.current = [];
     }
@@ -581,12 +794,43 @@ function App() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: "environment",
-        },
+      const gid = gameId.trim() || "default-game";
+      const requestedId = cameraId.trim();
+      const sessions = await fetchCameraSessionsForGame(gid);
+      const boundSession = sessions.find((row) => String(row?.camera_id || "") === requestedId);
+
+      if (!boundSession) {
+        setStreamStatus(`Camera ${requestedId} is not bound to game ${gid}. Register and bind this camera first.`);
+        setLastError("Camera must be registered and bound before streaming.");
+        return;
+      }
+
+      const boundType = String(boundSession.camera_type || "").trim().toLowerCase();
+      boundCameraTypeRef.current = boundType;
+      const selectedType = String(cameraType || "").trim().toLowerCase();
+      if (boundType && boundType !== selectedType) {
+        setCameraType(boundType);
+        setStreamStatus(`Camera type synced to bound type: ${boundType}.`);
+      }
+
+      const uiFps = Math.max(1, Math.min(4, Number(fps) || 2));
+      const cappedFps = backendIngestFpsLimit ? Math.min(uiFps, Math.max(1, Math.floor(backendIngestFpsLimit))) : uiFps;
+      const effectiveFps = cappedFps;
+      const videoConstraints = isMobileBrowser
+        ? {
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
+            facingMode: { ideal: "environment" },
+            frameRate: { ideal: effectiveFps, max: 10 },
+          }
+        : {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: "environment",
+          };
+
+      const stream = await requestUserMedia({
+        video: videoConstraints,
         audio: false,
       });
       mediaStreamRef.current = stream;
@@ -594,21 +838,37 @@ function App() {
       videoEl.srcObject = stream;
       await videoEl.play();
 
-      const intervalMs = Math.round(1000 / Math.max(1, Math.min(4, Number(fps) || 2)));
+      const intervalMs = Math.round(1000 / effectiveFps);
+      const uploadIntervalMs = Math.max(intervalMs, Math.round(1000 / Math.max(1, backendIngestFpsLimit || effectiveFps)));
+      uploadBaseIntervalRef.current = uploadIntervalMs;
+      uploadMinIntervalRef.current = uploadIntervalMs;
+      lastUploadTsRef.current = 0;
+      rateLimitCooldownUntilRef.current = 0;
+
       const batchLimit = Math.max(1, Math.min(2, Number(batchSize) || 1));
       setIsStreaming(true);
       setLastError("");
-      setStreamStatus(`Streaming ${Math.round(1000 / intervalMs)} FPS, batch=${batchLimit}`);
+      setStreamStatus(`Streaming ${Math.round(1000 / intervalMs)} FPS, batch=${batchLimit}${backendIngestFpsLimit ? ` (backend limit ${backendIngestFpsLimit} FPS)` : ""}${isMobileBrowser ? " (mobile mode)" : ""}`);
 
       streamTimerRef.current = setInterval(async () => {
+        const now = Date.now();
+        if (now < rateLimitCooldownUntilRef.current) {
+          return;
+        }
+
+        if ((now - lastUploadTsRef.current) < uploadMinIntervalRef.current) {
+          return;
+        }
+
         const frameB64 = frameToBase64(videoEl);
         if (!frameB64) return;
+        lastUploadTsRef.current = now;
 
         frameBatchRef.current.push({
-          game_id: gameId.trim() || "default-game",
-          camera_id: id,
-          camera_type: cameraType,
-          target_model_type: cameraType,
+          game_id: gid,
+          camera_id: requestedId,
+          camera_type: boundCameraTypeRef.current || boundType || selectedType || "hand",
+          target_model_type: boundCameraTypeRef.current || boundType || selectedType || "hand",
           device_id: id,
           session_id: sessionId || `sess-${id}`,
           frame_id: `${id}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
@@ -628,7 +888,9 @@ function App() {
         }
       }, intervalMs);
     } catch (err) {
-      setStreamStatus(`Cannot access webcam: ${err}`);
+      const msg = String(err?.message || err || "Cannot access webcam");
+      setLastError(msg);
+      setStreamStatus(`Cannot access webcam: ${msg}`);
       mediaStreamRef.current = null;
       setIsStreaming(false);
     }
@@ -917,6 +1179,39 @@ function App() {
         </aside>
 
         <section className="game-stage">
+          <section className="panel recommendation-hero" aria-live="polite">
+            <div className="setup-alert-block">
+              <div className="panel-head-row">
+                <h2 className="panel-title">Setup Warnings</h2>
+                <span className={`freshness-chip ${setupWarnings.length ? "freshness-old" : "freshness-fresh"}`}>
+                  {setupWarnings.length ? `${setupWarnings.length} issues` : "Ready"}
+                </span>
+              </div>
+              {setupWarnings.length === 0 ? (
+                <p className="inline-note">No blocking setup issues detected. You can stream from both mobile cameras.</p>
+              ) : (
+                <ul className="warning-list">
+                  {setupWarnings.map((warning, idx) => (
+                    <li key={`setup-warning-${idx}`}>{warning}</li>
+                  ))}
+                </ul>
+              )}
+              <div className="badge-row">
+                <span className="badge">Bound cameras {setupDiagnostics?.bound_camera_count ?? 0}/{setupDiagnostics?.required_camera_count ?? 2}</span>
+                <span className="badge">Readiness {setupDiagnostics?.readiness || "unknown"}</span>
+                <span className="badge">Target roles hand + table</span>
+                <span className="badge">Ingest limit {backendIngestFpsLimit ? `${backendIngestFpsLimit} FPS` : "unknown"}</span>
+              </div>
+            </div>
+
+            <div className="mobile-hint">
+              {isMobileBrowser
+                ? "Mobile camera mode detected. Use the rear camera, keep screen awake, and avoid app switching while streaming."
+                : "For phone capture, open this app in mobile browsers and use one device for hand, one for table."}
+            </div>
+
+          </section>
+
           <section className="panel recommendation-hero" aria-live="polite">
             <div className="panel-head-row">
               <h2 className="panel-title">Best Move</h2>
