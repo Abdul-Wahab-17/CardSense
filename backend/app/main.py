@@ -668,6 +668,17 @@ def _validate_camera_bind_request(game_id: str, camera_id: str, camera_type: str
     existing = sessions.get(camera_id)
     requested_type = str(camera_type or "").strip().lower()
 
+    if existing is not None:
+        existing_type = str(existing.camera_type or "").strip().lower()
+        if existing_type and requested_type and existing_type != requested_type:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Camera ID '{camera_id}' is already bound as '{existing_type}'. "
+                    "Use a different camera ID for the other device."
+                ),
+            )
+
     if existing is None and len(sessions) >= 2:
         raise HTTPException(status_code=400, detail="A game can bind at most two cameras")
 

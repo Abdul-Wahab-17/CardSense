@@ -96,3 +96,18 @@ def test_camera_binding_enforces_max_two_and_unique_type():
             _validate_camera_bind_request(game_id, "cam-extra", "hand")
     finally:
         camera_sessions.pop(game_id, None)
+
+
+def test_camera_binding_rejects_same_camera_id_type_flip():
+    game_id = "g-bind-flip"
+    camera_sessions.pop(game_id, None)
+    try:
+        camera_sessions[game_id]["cam-1"] = CameraSessionState(game_id=game_id, camera_id="cam-1", camera_type="hand")
+
+        with pytest.raises(HTTPException) as exc:
+            _validate_camera_bind_request(game_id, "cam-1", "table")
+
+        assert exc.value.status_code == 409
+        assert "already bound" in str(exc.value.detail)
+    finally:
+        camera_sessions.pop(game_id, None)

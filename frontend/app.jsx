@@ -99,6 +99,18 @@ function backendUrl(path) {
   return `${backendHttpBase()}${suffix}`;
 }
 
+function getOrCreateDeviceCameraId() {
+  const key = "cardsense_device_camera_id";
+  const existing = String(localStorage.getItem(key) || "").trim();
+  if (existing) {
+    return existing;
+  }
+  const rand = Math.random().toString(36).slice(2, 8);
+  const generated = `cam-${rand}`;
+  localStorage.setItem(key, generated);
+  return generated;
+}
+
 async function readApiError(res, fallback = "Request failed") {
   let text = "";
   try {
@@ -129,7 +141,7 @@ function friendlyIngestError(message) {
     return "This camera is not bound to the selected game. Register and bind both hand and table cameras first.";
   }
   if (lower.includes("bound camera type mismatch")) {
-    return "Camera type mismatch. Make sure the stream camera type matches the type used during bind.";
+    return "Camera type mismatch. Make sure this device uses the bound camera type and that each phone has a unique camera ID.";
   }
   if (lower.includes("frame ingest rate limit exceeded")) {
     return "Frame rate too high for ingest limits. Reduce FPS or wait briefly.";
@@ -180,7 +192,7 @@ async function requestUserMedia(constraints) {
 
 function App() {
   const [gameId, setGameId] = useState("default-game");
-  const [cameraId, setCameraId] = useState("cam-1");
+  const [cameraId, setCameraId] = useState(getOrCreateDeviceCameraId);
   const [cameraType, setCameraType] = useState("hand");
   const [leaderSeat, setLeaderSeat] = useState("me");
   const [toPlaySeat, setToPlaySeat] = useState("me");
