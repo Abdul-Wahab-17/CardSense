@@ -5,9 +5,12 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch torchvision \
-	|| pip install --no-cache-dir torch torchvision
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# PyTorch with CUDA 12.8 wheels — required for Blackwell (sm_120, RTX 50-series).
+# Falls back to cu126 then CPU build if cu128 isn't available on this network.
+RUN pip install --no-cache-dir --timeout=300 --retries=5 --index-url https://download.pytorch.org/whl/cu128 torch torchvision \
+	|| pip install --no-cache-dir --timeout=300 --retries=5 --index-url https://download.pytorch.org/whl/cu126 torch torchvision \
+	|| pip install --no-cache-dir --timeout=300 --retries=5 torch torchvision
+RUN pip install --no-cache-dir --timeout=180 --retries=5 -r /app/requirements.txt
 
 COPY worker /app/worker
 

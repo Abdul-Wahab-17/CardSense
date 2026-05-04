@@ -1,10 +1,21 @@
 import asyncio
 import json
+import logging
 import sqlite3
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+
+logger = logging.getLogger("cardsense.api")
+
+# Ensure all cardsense.* loggers emit INFO so /process_frame, agent, vision, etc.
+# are actually visible in `docker logs cardsense-api`.
+logging.getLogger("cardsense").setLevel(logging.INFO)
+# Add a stream handler if uvicorn's parent logger doesn't have one
+_root = logging.getLogger()
+if not _root.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +31,8 @@ from .feature_flags import FEATURE_FLAGS_METADATA
 from .fusion import FusionEngine
 from .game_state import GameStateEngine
 from .llm_advisor import llm_advisor_enabled, request_llm_recommendation
+from .llm_blackjack import explain_recommendation as bj_explain_recommendation, llm_enabled as bj_llm_enabled, tipsi_review as bj_tipsi_review
+from .blackjack_engine import blackjack_engine
 from .match_engine import MatchEngine
 from .models import (
     ActionScore,
@@ -760,6 +773,22 @@ async def consume_detections() -> None:
                         parsed = DetectionEvent.model_validate(event, strict=True)
                     except ValidationError as exc:
                         event["validation_error"] = str(exc)
+                        await hub.remember(event)
+                        continue
+
+                    # ------------------------------------------------------------------
+                    # Blackjack fast-path: if this game is registered with blackjack_engine,
+                    # route detections to ROI-based player/dealer classification + dedup,
+                    # then skip the trick-taking reducer entirely. Live state is broadcast
+                    # by `_broadcast_bj_state` whenever observe_card mutates state.
+                    # ------------------------------------------------------------------
+                    if blackjack_engine.has(parsed.game_id):
+                        # Blackjack games are owned by the Claude agent path
+                        # (/api/blackjack/games/{id}/process_frame). YOLO
+                        # detections still flow for monitoring / metrics, but
+                        # we DO NOT mutate engine state from them — that races
+                        # with the agent and corrupts state. The agent is the
+                        # single source of truth for blackjack-game mutations.
                         await hub.remember(event)
                         continue
 
@@ -1849,6 +1878,282 @@ async def feature_flags() -> dict:
 async def autoscale_suggest(_claims: dict = Depends(require_auth_roles({settings.admin_role_name}))) -> dict:
     queue_depth = int(await redis_client.xlen(settings.frame_stream))
     return compute_desired_workers(queue_depth)
+
+
+# ============================================================================
+# Blackjack mode  (separate game-type from the trick-taking engine)
+# ============================================================================
+#
+# Blackjack games are tracked by `blackjack_engine` (in `blackjack_engine.py`)
+# in parallel with — not on top of — the main `game_state_engine`. A single
+# `game_id` should only ever be one game type.
+#
+# Camera + worker pipeline is shared. Detection events still flow through
+# Redis Streams; what changes is the reducer behaviour for blackjack games
+# (player vs dealer ROI classification, single-card observations rather than
+# 13-card trick-taking state). That reducer wiring lives in Phase 3.
+# ============================================================================
+
+from pydantic import BaseModel as _BJBase  # noqa: E402  (avoid polluting top imports)
+from typing import List as _BJList, Literal as _BJLit, Optional as _BJOpt  # noqa: E402
+
+
+class BJStartIn(_BJBase):
+    decks_in_shoe: int = 1
+    reshuffle_at_pct: float = 0.25
+    bet: float = 1.0
+
+
+class BJDealIn(_BJBase):
+    player_cards: _BJList[str]  # 2 raw labels e.g. ["AS", "10H"]
+    dealer_cards: _BJList[str]  # 2 raw labels (upcard first)
+
+
+class BJObserveIn(_BJBase):
+    label: str
+    target: _BJLit["player", "dealer"]
+
+
+class BJActionIn(_BJBase):
+    action: _BJLit["hit", "stand", "double"]
+    drawn_label: _BJOpt[str] = None
+
+
+class BJNewRoundIn(_BJBase):
+    reshuffle: _BJOpt[bool] = None
+    bet: float = 1.0
+
+
+class BJRoiRect(_BJBase):
+    """Normalized [0,1] rectangle. Origin top-left."""
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+class BJRoiIn(_BJBase):
+    player_roi: _BJOpt[BJRoiRect] = None
+    dealer_roi: _BJOpt[BJRoiRect] = None
+    auto_deal: _BJOpt[bool] = None
+
+
+def _bj_state_payload(game_id: str, *, with_recommendation: bool = True, with_llm: bool = False) -> dict:
+    state = blackjack_engine.get(game_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"no blackjack game {game_id!r}")
+    out: dict = {
+        "ok": True,
+        "game_id": game_id,
+        "state": state.model_dump(),
+    }
+    if with_recommendation and state.player.cards and state.dealer.cards and not state.is_round_over():
+        rec = blackjack_engine.recommend(game_id)
+        rec_dump = rec.model_dump()
+        if with_llm and bj_llm_enabled():
+            narration = bj_explain_recommendation(state, rec)
+            if narration:
+                rec_dump["llm_narration"] = narration
+        out["recommendation"] = rec_dump
+    return out
+
+
+async def _broadcast_bj_state(game_id: str) -> None:
+    """Push the latest blackjack state to all connected WebSocket clients."""
+    try:
+        payload = _bj_state_payload(game_id, with_recommendation=True, with_llm=False)
+    except HTTPException:
+        return
+    event = {
+        "type": "blackjack_state",
+        "game_id": game_id,
+        "ts_ms": int(time.time() * 1000),
+        **payload,
+    }
+    try:
+        await hub.broadcast(event)
+        await hub.remember(event)
+    except Exception:
+        pass
+
+
+@app.post("/api/blackjack/games/{game_id}/start")
+async def bj_start(
+    game_id: str,
+    body: BJStartIn,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    blackjack_engine.start_game(
+        game_id,
+        decks_in_shoe=body.decks_in_shoe,
+        reshuffle_at_pct=body.reshuffle_at_pct,
+        bet=body.bet,
+    )
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_recommendation=False)
+
+
+@app.post("/api/blackjack/games/{game_id}/deal")
+async def bj_deal(
+    game_id: str,
+    body: BJDealIn,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    try:
+        blackjack_engine.deal_initial(game_id, body.player_cards, body.dealer_cards)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_llm=True)
+
+
+@app.post("/api/blackjack/games/{game_id}/observe")
+async def bj_observe(
+    game_id: str,
+    body: BJObserveIn,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    try:
+        blackjack_engine.observe_card(game_id, body.label, body.target)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_llm=True)
+
+
+@app.post("/api/blackjack/games/{game_id}/action")
+async def bj_action(
+    game_id: str,
+    body: BJActionIn,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    try:
+        blackjack_engine.player_action(game_id, body.action, body.drawn_label)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_llm=True)
+
+
+@app.post("/api/blackjack/games/{game_id}/reveal_dealer")
+async def bj_reveal_dealer(
+    game_id: str,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    try:
+        blackjack_engine.reveal_dealer_hole(game_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_llm=True)
+
+
+@app.post("/api/blackjack/games/{game_id}/new_round")
+async def bj_new_round(
+    game_id: str,
+    body: BJNewRoundIn,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    try:
+        blackjack_engine.new_round(game_id, reshuffle=body.reshuffle, bet=body.bet)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_recommendation=False)
+
+
+@app.get("/api/blackjack/games/{game_id}/state")
+async def bj_state(game_id: str, llm: bool = False) -> dict:
+    return _bj_state_payload(game_id, with_recommendation=True, with_llm=llm)
+
+
+@app.get("/api/blackjack/games/{game_id}/history")
+async def bj_history(game_id: str, limit: int = 50) -> dict:
+    return {
+        "ok": True,
+        "game_id": game_id,
+        "history": blackjack_engine.history(game_id, limit=limit),
+    }
+
+
+@app.get("/api/blackjack/games/{game_id}/diagnostics")
+async def bj_diagnostics(game_id: str) -> dict:
+    return {"ok": True, **blackjack_engine.diagnostics(game_id)}
+
+
+class BJProcessFrameIn(_BJBase):
+    frame_b64: str  # raw base64 JPEG (no data: prefix)
+
+
+@app.post("/api/blackjack/games/{game_id}/process_frame")
+async def bj_process_frame(game_id: str, body: BJProcessFrameIn) -> dict:
+    """Run the Claude vision agent on a single frame.
+
+    Cheap frame-diff first (skip if scene hasn't changed). Otherwise call
+    Claude with the image + current engine state + tool schema; dispatch any
+    tool calls into the engine. WebSocket-broadcasts the new state.
+    """
+    from .blackjack_agent import process_frame as agent_process_frame
+
+    # Run the (potentially slow) agent call off the event loop
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, agent_process_frame, game_id, body.frame_b64)
+
+    # If state changed (any actions ran), broadcast
+    if result.get("ok") and result.get("actions"):
+        try:
+            await _broadcast_bj_state(game_id)
+        except Exception:
+            pass
+
+    return result
+
+
+@app.post("/api/blackjack/games/{game_id}/tipsi")
+async def bj_tipsi(
+    game_id: str,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    state = blackjack_engine.get(game_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"no blackjack game {game_id!r}")
+    history = blackjack_engine.history(game_id)
+    if not history:
+        return {"ok": True, "game_id": game_id, "review": None, "reason": "no completed rounds yet"}
+    if not bj_llm_enabled():
+        return {
+            "ok": True,
+            "game_id": game_id,
+            "review": None,
+            "reason": "llm not configured (set llm_enabled=1 + llm_api_key + llm_model)",
+        }
+    review = bj_tipsi_review(state, history)
+    return {"ok": True, "game_id": game_id, "review": review}
+
+
+@app.get("/api/blackjack/games")
+async def bj_list() -> dict:
+    return {
+        "ok": True,
+        "games": {gid: s.model_dump() for gid, s in blackjack_engine.all_states().items()},
+    }
+
+
+@app.post("/api/blackjack/games/{game_id}/roi")
+async def bj_set_roi(
+    game_id: str,
+    body: BJRoiIn,
+    _claims: dict = Depends(require_auth_roles({settings.operator_role_name, settings.admin_role_name})),
+) -> dict:
+    from .blackjack import ROI as _BJ_ROI
+    p = _BJ_ROI(**body.player_roi.model_dump()) if body.player_roi else None
+    d = _BJ_ROI(**body.dealer_roi.model_dump()) if body.dealer_roi else None
+    try:
+        blackjack_engine.set_roi(game_id, player_roi=p, dealer_roi=d, auto_deal=body.auto_deal)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    await _broadcast_bj_state(game_id)
+    return _bj_state_payload(game_id, with_recommendation=False)
 
 
 frontend_path = Path(settings.static_dir)

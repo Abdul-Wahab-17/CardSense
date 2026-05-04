@@ -1,0 +1,557 @@
+/* CardSense Blackjack HUD — mobile-first redesign.
+   Designed for a phone held in portrait, used with one thumb. */
+
+:root {
+  --bg-1: #0e3b25;
+  --bg-2: #062014;
+  --bg-3: #02110a;
+  --fg: #e8f5ec;
+  --fg-dim: rgba(232, 245, 236, 0.65);
+  --accent: #7ef0a8;
+  --warn: #ffd479;
+  --bad: #ff8c8c;
+  --info: #6ec0ff;
+  --purple: #c4a8ff;
+  --panel: rgba(0, 0, 0, 0.45);
+  --panel-2: rgba(0, 0, 0, 0.65);
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+.bj-body {
+  background: radial-gradient(ellipse at top, var(--bg-1) 0%, var(--bg-2) 60%, var(--bg-3) 100%);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  min-height: 100vh;
+  /* iOS safe area */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bj-app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 8px 8px 96px;     /* leave space for sticky action bar */
+  gap: 10px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* ============================================================ TOP STRIP */
+.bj-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  flex-wrap: wrap;
+}
+.bj-strip-game {
+  font-weight: 600;
+  color: var(--fg);
+  text-transform: uppercase;
+  font-size: 11px;
+  background: rgba(255,255,255,0.06);
+  padding: 2px 8px;
+  border-radius: 6px;
+  margin-right: auto;
+}
+.bj-strip-stat strong { color: var(--fg); margin-left: 4px; font-weight: 600; }
+.bj-strip-stat.pos strong { color: var(--accent); }
+.bj-strip-stat.neg strong { color: var(--bad); }
+.bj-strip-conn {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--bad);
+  margin-left: 4px;
+}
+.bj-strip-conn.ok { background: var(--accent); }
+
+/* ============================================================ THE BIG HUD */
+.bj-hud {
+  background: linear-gradient(160deg, rgba(20,60,40,0.85), rgba(8,30,18,0.85));
+  border: 1px solid rgba(126,240,168,0.35);
+  border-radius: 18px;
+  padding: 22px 18px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+}
+.bj-hud::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 70% 0%, rgba(126,240,168,0.15) 0%, transparent 60%);
+  pointer-events: none;
+}
+.bj-hud.bj-act-stand { border-color: rgba(255,212,121,0.45); }
+.bj-hud.bj-act-stand::before { background: radial-gradient(circle at 70% 0%, rgba(255,212,121,0.15) 0%, transparent 60%); }
+.bj-hud.bj-act-double { border-color: rgba(110,192,255,0.5); }
+.bj-hud.bj-act-double::before { background: radial-gradient(circle at 70% 0%, rgba(110,192,255,0.18) 0%, transparent 60%); }
+
+.bj-hud-action {
+  font-size: 64px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  color: #fff;
+  text-shadow: 0 0 24px rgba(126,240,168,0.55);
+  margin: 4px 0 8px;
+}
+.bj-act-stand .bj-hud-action { color: var(--warn); text-shadow: 0 0 24px rgba(255,212,121,0.5); }
+.bj-act-double .bj-hud-action { color: var(--info); text-shadow: 0 0 24px rgba(110,192,255,0.5); }
+.bj-hud-action.bj-hud-empty { color: rgba(255,255,255,0.4); text-shadow: none; font-size: 36px; }
+.bj-hud-action.bj-hud-outcome { font-size: 38px; color: var(--purple); text-shadow: 0 0 18px rgba(196,168,255,0.5); }
+
+.bj-hud-confidence {
+  font-size: 13px; color: var(--fg-dim);
+  letter-spacing: 0.03em; margin-bottom: 10px;
+}
+.bj-tag {
+  display: inline-block;
+  margin-left: 6px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.bj-hud-llm {
+  font-style: italic;
+  color: #a8e7c0;
+  font-size: 14px;
+  line-height: 1.4;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+}
+.bj-hud-reason {
+  font-size: 13px;
+  color: rgba(255,255,255,0.78);
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.bj-hud-stats {
+  display: flex;
+  justify-content: space-around;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.bj-hud-stats strong { color: #fff; font-weight: 600; }
+
+/* ============================================================ HANDS */
+.bj-hands {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.bj-hand {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 100px;
+}
+.bj-hand-label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.bj-hand-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  flex: 1;
+}
+.bj-card {
+  background: linear-gradient(180deg, #fafafa, #d4d4d4);
+  color: #111;
+  font-weight: 700;
+  font-size: 18px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  min-width: 32px;
+  text-align: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+.bj-card-back {
+  background: linear-gradient(135deg, #345, #234);
+  color: #ccc;
+  border: 1px dashed rgba(255,255,255,0.3);
+}
+.bj-hand-empty { color: rgba(255,255,255,0.3); font-size: 22px; }
+.bj-hand-total {
+  align-self: flex-end;
+  font-size: 13px;
+  color: var(--fg-dim);
+  font-weight: 500;
+}
+
+/* ============================================================ CAMERA SECTION */
+.bj-cam-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.bj-cam-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.bj-cam-arrow { font-size: 16px; opacity: 0.7; }
+.bj-cam-collapsed .bj-cam-header { padding: 8px 14px; opacity: 0.85; }
+.bj-cam-body { padding: 0 10px 10px; }
+
+.bj-cam-wrap {
+  position: relative;
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+  width: 100%;
+  /* Phone-first: occupy a large chunk of vertical space so the user can actually
+     see what the camera sees and aim ROIs precisely. Capped so it doesn't
+     dominate desktops. */
+  height: clamp(360px, 65vh, 720px);
+  margin-bottom: 8px;
+}
+.bj-cam-wrap video,
+.bj-cam-wrap canvas.bj-cam-overlay {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+}
+/* `cover` (not contain) — fills the whole box. Avoids letterbox bars that
+   would otherwise create dead zones the ROI canvas covers but the actual
+   video doesn't, which would corrupt classification coordinates. The user
+   can rotate the phone to landscape if they want wider FOV. */
+.bj-cam-wrap video { object-fit: cover; z-index: 1; }
+.bj-cam-overlay {
+  z-index: 3;
+  cursor: crosshair;
+  touch-action: none;
+}
+.bj-cam-hint {
+  position: absolute;
+  top: 8px; left: 8px;
+  z-index: 4;
+  background: rgba(0,0,0,0.7);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+.bj-cam-hint-center {
+  top: 50%; left: 50%; transform: translate(-50%, -50%);
+  font-size: 14px;
+}
+/* Static halves: top half = dealer, bottom half = player.
+   No drag, no editor, no fuss — these are baked in. */
+.bj-zone {
+  position: absolute;
+  left: 0; right: 0;
+  pointer-events: none;
+  z-index: 2;
+  border: 2px dashed transparent;
+}
+.bj-zone-dealer {
+  top: 0; height: 50%;
+  border-color: rgba(255,212,121,0.55);
+  background: linear-gradient(180deg, rgba(255,212,121,0.10), rgba(255,212,121,0));
+}
+.bj-zone-player {
+  top: 50%; height: 50%;
+  border-color: rgba(126,240,168,0.55);
+  background: linear-gradient(0deg, rgba(126,240,168,0.10), rgba(126,240,168,0));
+}
+.bj-zone-label {
+  position: absolute;
+  top: 8px; left: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.bj-zone-player .bj-zone-label { top: 8px; }
+
+.bj-cam-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bj-pill {
+  flex: 1 1 auto;
+  min-height: 38px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bj-pill:hover { background: rgba(126,240,168,0.15); }
+.bj-pill:disabled { opacity: 0.4; }
+.bj-pill-on {
+  background: rgba(126,240,168,0.25);
+  border-color: rgba(126,240,168,0.55);
+}
+.bj-cam-err {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--bad);
+}
+
+.bj-agent-strip {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(126, 240, 168, 0.06);
+  border: 1px solid rgba(126, 240, 168, 0.18);
+  border-radius: 8px;
+  font-size: 12px;
+  color: rgba(232, 245, 236, 0.85);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bj-agent-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgba(126, 240, 168, 0.5);
+  flex-shrink: 0;
+}
+.bj-agent-dot.bj-agent-busy {
+  background: var(--accent);
+  animation: bj-agent-pulse 1.2s infinite;
+}
+@keyframes bj-agent-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(126, 240, 168, 0.5); }
+  50%      { box-shadow: 0 0 0 6px rgba(126, 240, 168, 0); }
+}
+.bj-agent-text {
+  flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+}
+.bj-agent-err {
+  color: var(--bad);
+  font-size: 11px;
+}
+
+/* ============================================================ STICKY ACTION BAR */
+.bj-actions {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  background: linear-gradient(180deg, rgba(2,17,10,0) 0%, rgba(2,17,10,0.95) 30%);
+  z-index: 50;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  max-width: 720px;
+  margin: 0 auto;
+}
+.bj-action {
+  flex: 1 1 auto;
+  min-height: 56px;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 6px;
+  border-radius: 14px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  -webkit-tap-highlight-color: rgba(126,240,168,0.3);
+  transition: transform 80ms;
+}
+.bj-action:active { transform: scale(0.96); }
+.bj-action:disabled { opacity: 0.35; }
+.bj-action-primary {
+  background: linear-gradient(180deg, rgba(126,240,168,0.4), rgba(126,240,168,0.25));
+  border-color: rgba(126,240,168,0.6);
+  color: #fff;
+}
+.bj-action-tipsi {
+  background: linear-gradient(180deg, rgba(196,168,255,0.3), rgba(196,168,255,0.18));
+  border-color: rgba(196,168,255,0.5);
+}
+.bj-action-more {
+  flex: 0 0 56px;
+  font-size: 22px;
+}
+
+/* ============================================================ DRAWER */
+.bj-drawer-bg {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: bj-fade 180ms ease;
+}
+.bj-drawer {
+  background: linear-gradient(180deg, #0c2a1a 0%, #051609 100%);
+  width: 100%;
+  max-width: 720px;
+  max-height: 80vh;
+  border-radius: 18px 18px 0 0;
+  border-top: 1px solid var(--border);
+  padding: 22px 18px;
+  padding-bottom: calc(22px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  position: relative;
+  animation: bj-slide-up 200ms ease;
+}
+.bj-drawer h3 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.bj-drawer-close {
+  position: absolute; top: 10px; right: 14px;
+  background: transparent; color: var(--fg-dim);
+  border: none; font-size: 28px;
+  width: 36px; height: 36px;
+  cursor: pointer;
+}
+.bj-list-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 14px 16px;
+  border-radius: 12px;
+  font-size: 15px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.bj-hint { color: var(--fg-dim); font-size: 13px; line-height: 1.4; }
+.bj-setting {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-bottom: 10px; font-size: 12px; color: var(--fg-dim);
+}
+.bj-setting input {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px;
+  color: var(--fg); font-size: 16px;
+}
+.bj-mp-section { margin-bottom: 16px; }
+.bj-mp-title { font-size: 13px; color: var(--fg-dim); margin-bottom: 6px; }
+.bj-mp-row { display: flex; gap: 6px; margin-bottom: 6px; }
+.bj-mp-row input {
+  flex: 1; min-width: 0;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px;
+  color: var(--fg); font-size: 16px;
+  text-transform: uppercase;
+}
+.bj-mp-btn {
+  background: rgba(126,240,168,0.2);
+  border: 1px solid rgba(126,240,168,0.5);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px; font-weight: 600;
+  cursor: pointer;
+}
+.bj-mp-btn:disabled { opacity: 0.35; }
+
+/* ============================================================ HISTORY */
+.bj-history {
+  list-style: none;
+  margin: 0; padding: 0;
+}
+.bj-history li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  gap: 8px;
+}
+.bj-history li:last-child { border-bottom: none; }
+.bj-h-cards { font-family: ui-monospace, SFMono-Regular, monospace; flex: 1; min-width: 0; }
+.bj-h-cards small { opacity: 0.6; margin: 0 4px; }
+.bj-h-out { font-weight: 600; font-size: 12px; white-space: nowrap; }
+.bj-out-win { color: var(--accent); }
+.bj-out-lose { color: var(--bad); }
+.bj-out-push { color: var(--warn); }
+.bj-out-other { color: var(--purple); }
+
+.bj-tipsi-text {
+  white-space: pre-wrap;
+  line-height: 1.55;
+  font-size: 15px;
+  color: var(--fg);
+}
+
+/* ============================================================ TOAST */
+.bj-toast {
+  position: fixed;
+  bottom: 88px; left: 12px; right: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  display: flex; justify-content: space-between; align-items: center;
+  z-index: 80;
+  max-width: 720px; margin: 0 auto;
+}
+.bj-toast button {
+  background: none; border: none; color: var(--bad);
+  font-size: 22px; cursor: pointer;
+}
+
+/* ============================================================ ANIMATIONS */
+@keyframes bj-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes bj-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+/* ============================================================ DESKTOP TWEAKS */
+@media (min-width: 720px) {
+  .bj-hud-action { font-size: 80px; }
+  .bj-hud-action.bj-hud-outcome { font-size: 48px; }
+  .bj-hand { padding: 14px 16px; }
+  .bj-card { font-size: 22px; }
+}

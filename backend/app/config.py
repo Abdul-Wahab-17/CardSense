@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     llm_api_base: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    # Fast model for vision frame classification — Haiku is ~3x faster than
+    # Sonnet, accuracy is plenty for playing cards. Falls back to llm_model.
+    llm_vision_model: str = "anthropic/claude-haiku-4.5"
     llm_timeout_sec: float = 8.0
     llm_temperature: float = 0.1
     llm_max_tokens: int = 300
