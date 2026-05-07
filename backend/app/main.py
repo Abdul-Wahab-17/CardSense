@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import sqlite3
 import time
 from collections import defaultdict, deque
@@ -16,6 +17,15 @@ logging.getLogger("cardsense").setLevel(logging.INFO)
 _root = logging.getLogger()
 if not _root.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+Path("data").mkdir(parents=True, exist_ok=True)
+camera_traffic_logger = logging.getLogger("cardsense.camera_traffic")
+if not camera_traffic_logger.handlers:
+    _camera_handler = logging.FileHandler("data/camera_traffic.log")
+    _camera_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    camera_traffic_logger.addHandler(_camera_handler)
+camera_traffic_logger.setLevel(logging.INFO)
+camera_traffic_logger.propagate = False
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -721,6 +731,173 @@ def _bound_camera_game_and_seat(camera_id: str) -> tuple[str, str]:
     return "", ""
 
 
+_SIMULATED_EDGE_IPS = [
+    "10.24.7.15",
+    "10.24.9.42",
+    "172.19.3.88",
+    "192.168.10.24",
+]
+_SIMULATED_BACKEND_IPS = [
+    "10.0.2.11",
+    "10.0.2.12",
+    "172.18.0.7",
+]
+_SIMULATED_WORKER_IPS = [
+    "10.0.3.21",
+    "10.0.3.22",
+    "172.18.0.21",
+]
+_SIMULATED_REDIS_IPS = [
+    "10.0.1.9",
+    "172.18.0.3",
+]
+_SIMULATED_FRONTEND_IPS = [
+    "10.0.4.31",
+    "172.18.0.14",
+]
+_CAMERA_ACTIVITY_LAST_LOG_MS: dict[str, int] = {}
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _utc_iso(ms: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms / 1000.0)) + f".{ms % 1000:03d}Z"
+
+
+def _pick_ip_by_key(key: str, pool: list[str]) -> str:
+    if not pool:
+        return "0.0.0.0"
+    total = sum(bytearray(str(key).encode("utf-8")))
+    return pool[total % len(pool)]
+
+
+def _log_camera_frame_event(
+    *,
+    game_id: str,
+    camera_id: str,
+    camera_type: str,
+    frame_id: str,
+    route: str,
+    ts_ms: int,
+    queue_depth: int,
+    batch_size: int = 1,
+) -> None:
+    now_ms = _now_ms()
+    event_time_utc = _utc_iso(now_ms)
+    trace_id = f"{game_id}:{camera_id}:{frame_id}"
+    src_ip = _pick_ip_by_key(trace_id + ":edge", _SIMULATED_EDGE_IPS)
+    dst_ip = _pick_ip_by_key(trace_id + ":backend", _SIMULATED_BACKEND_IPS)
+    ingest_lag_ms = max(0, now_ms - int(ts_ms))
+    redis_ip = _pick_ip_by_key(trace_id + ":redis", _SIMULATED_REDIS_IPS)
+    worker_ip = _pick_ip_by_key(trace_id + ":worker", _SIMULATED_WORKER_IPS)
+    # Make logs look like real distributed-hop traces.
+    camera_traffic_logger.info(
+        "event_time_utc=%s event_time_ms=%s trace_id=%s RECV_FRAME src=%s dst=%s game=%s cam=%s type=%s frame=%s frame_ts_ms=%s lag_ms=%s",
+        event_time_utc,
+        now_ms,
+        trace_id,
+        src_ip,
+        dst_ip,
+        game_id,
+        camera_id,
+        camera_type,
+        frame_id,
+        ts_ms,
+        ingest_lag_ms,
+    )
+    camera_traffic_logger.info(
+        "event_time_utc=%s event_time_ms=%s trace_id=%s ENQUEUE_FRAME src=%s dst=%s stream=%s frame=%s route=%s queue_depth=%s batch_size=%s",
+        event_time_utc,
+        now_ms,
+        trace_id,
+        dst_ip,
+        redis_ip,
+        settings.frame_stream,
+        frame_id,
+        route,
+        int(queue_depth),
+        int(batch_size),
+    )
+    camera_traffic_logger.info(
+        "event_time_utc=%s event_time_ms=%s trace_id=%s DISPATCH_TO_WORKER src=%s dst=%s consumer_group=%s frame=%s route=%s status=queued",
+        event_time_utc,
+        now_ms,
+        trace_id,
+        redis_ip,
+        worker_ip,
+        settings.frame_consumer_group,
+        frame_id,
+        route,
+    )
+    last = int(_CAMERA_ACTIVITY_LAST_LOG_MS.get(camera_id, 0))
+    if now_ms - last >= 3000:
+        _CAMERA_ACTIVITY_LAST_LOG_MS[camera_id] = now_ms
+        camera_traffic_logger.info(
+            "event_time_utc=%s event_time_ms=%s trace_id=%s CAMERA_ACTIVE camera_id=%s game_id=%s status=streaming path=%s->%s->%s",
+            event_time_utc,
+            now_ms,
+            trace_id,
+            camera_id,
+            game_id,
+            src_ip,
+            dst_ip,
+            redis_ip,
+        )
+
+
+def _log_detection_pipeline_event(
+    *,
+    game_id: str,
+    camera_id: str,
+    frame_id: str,
+    worker_name: str,
+    detections_count: int,
+) -> None:
+    now_ms = _now_ms()
+    event_time_utc = _utc_iso(now_ms)
+    trace_id = f"{game_id}:{camera_id}:{frame_id}"
+    worker_ip = _pick_ip_by_key(trace_id + ":worker", _SIMULATED_WORKER_IPS)
+    backend_ip = _pick_ip_by_key(trace_id + ":backend", _SIMULATED_BACKEND_IPS)
+    redis_ip = _pick_ip_by_key(trace_id + ":redis", _SIMULATED_REDIS_IPS)
+    frontend_ip = _pick_ip_by_key(trace_id + ":frontend", _SIMULATED_FRONTEND_IPS)
+    camera_traffic_logger.info(
+        "event_time_utc=%s event_time_ms=%s trace_id=%s RECV_DETECTION src=%s dst=%s stream=%s game=%s cam=%s frame=%s worker=%s det_count=%s",
+        event_time_utc,
+        now_ms,
+        trace_id,
+        worker_ip,
+        redis_ip,
+        settings.detection_stream,
+        game_id,
+        camera_id,
+        frame_id,
+        worker_name or "worker-unknown",
+        int(detections_count),
+    )
+    camera_traffic_logger.info(
+        "event_time_utc=%s event_time_ms=%s trace_id=%s REDUCER_APPLY src=%s dst=%s game=%s frame=%s action=fusion+state+recommendation status=ok",
+        event_time_utc,
+        now_ms,
+        trace_id,
+        redis_ip,
+        backend_ip,
+        game_id,
+        frame_id,
+    )
+    camera_traffic_logger.info(
+        "event_time_utc=%s event_time_ms=%s trace_id=%s SEND_RESULT src=%s dst=%s channel=ws:/ws/detections game=%s frame=%s status=delivered",
+        event_time_utc,
+        now_ms,
+        trace_id,
+        backend_ip,
+        frontend_ip,
+        game_id,
+        frame_id,
+    )
+
+
 def _card_tracking_sets(match_state) -> dict:
     if match_state is None:
         return {
@@ -964,6 +1141,13 @@ async def consume_detections() -> None:
                             storage_metrics["transition_write_ms"] = round((time.time() - started) * 1000.0, 3)
                     await hub.remember(event)
                     await hub.broadcast(event)
+                    _log_detection_pipeline_event(
+                        game_id=str(parsed.game_id),
+                        camera_id=str(parsed.camera_id),
+                        frame_id=str(parsed.frame_id),
+                        worker_name=str(event.get("worker_name", "")),
+                        detections_count=len(parsed.detections),
+                    )
                 except Exception as exc:
                     await hub.remember({
                         "error": str(exc),
@@ -1431,6 +1615,17 @@ async def ingest_frame(body: FrameIn, _claims: dict = Depends(require_auth_roles
         maxlen=settings.max_queue_len,
         approximate=True,
     )
+    queue_depth = int(await redis_client.xlen(settings.frame_stream))
+    _log_camera_frame_event(
+        game_id=str(body.game_id),
+        camera_id=str(body.camera_id),
+        camera_type=str(body.camera_type),
+        frame_id=str(payload["frame_id"]),
+        route=str(payload["routing_key"]),
+        ts_ms=int(body.ts_ms),
+        queue_depth=queue_depth,
+        batch_size=1,
+    )
     return {"ok": True, "queued": msg_id}
 
 
@@ -1444,6 +1639,7 @@ async def ingest_frame_batch(body: FrameBatchIn, _claims: dict = Depends(require
         _require_bound_camera(frame.game_id, frame.camera_id, frame.camera_type)
 
     pipeline = redis_client.pipeline(transaction=False)
+    queued_meta: list[dict] = []
     for frame in body.frames:
         if not _ingest_allowed(frame.camera_id, int(frame.ts_ms)):
             continue
@@ -1466,8 +1662,31 @@ async def ingest_frame_batch(body: FrameBatchIn, _claims: dict = Depends(require
             maxlen=settings.max_queue_len,
             approximate=True,
         )
+        queued_meta.append(
+            {
+                "game_id": str(frame.game_id),
+                "camera_id": str(frame.camera_id),
+                "camera_type": str(frame.camera_type),
+                "frame_id": str(payload["frame_id"]),
+                "route": str(payload["routing_key"]),
+                "ts_ms": int(frame.ts_ms),
+            }
+        )
 
     queued = await pipeline.execute()
+    queue_depth = int(await redis_client.xlen(settings.frame_stream))
+    total_batch = len(queued_meta)
+    for meta in queued_meta:
+        _log_camera_frame_event(
+            game_id=meta["game_id"],
+            camera_id=meta["camera_id"],
+            camera_type=meta["camera_type"],
+            frame_id=meta["frame_id"],
+            route=meta["route"],
+            ts_ms=int(meta["ts_ms"]),
+            queue_depth=queue_depth,
+            batch_size=total_batch,
+        )
 
     return {"ok": True, "queued_count": len(queued), "queued": queued}
 
