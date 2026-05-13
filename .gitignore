@@ -8,3 +8,8 @@ java
 __pycache__/
 worker/__pycache__
 *.db
+data/
+.tmp_extract/
+node_modules/
+package.json
+package-lock.json
