@@ -6,6 +6,8 @@ Real-time playing-card detection with live Blackjack advice. Phone or webcam fra
 
 ![Blackjack HUD](docs/screenshots/blackjack-phone.png)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 A three-person university project (a Deep Learning course and a Parallel and Distributed Computing course, Spring 2026). See [Credits](#credits).
 
 ## What it does
