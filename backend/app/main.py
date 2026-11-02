@@ -1258,6 +1258,7 @@ async def health() -> dict:
     return {
         "ok": True,
         "redis": pong,
+        "auth_enabled": bool(settings.auth_enabled),
         "ingest": {
             "frame_ingest_rate_limit_fps": float(settings.frame_ingest_rate_limit_fps),
         },

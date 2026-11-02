@@ -1,5 +1,6 @@
 /* CardSense — Blackjack HUD page (mobile-first redesign).
-   - No auth. AUTH_ENABLED=0 server-side so requests work anonymously.
+   - Works anonymously when the server runs with AUTH_ENABLED=0; otherwise it uses the session
+     from the main page (sign in at / first) and says so when there is none.
    - Sticky giant HUD on top, camera collapsible below.
    - Big touch-friendly buttons. Bottom sheet for settings/history/tipsi.
 */
@@ -21,14 +22,36 @@ function backendUrl(p) { return `${backendHttpBase()}${p}`; }
 async function apiFetch(path, opts = {}) {
   const headers = new Headers(opts.headers || {});
   if (!headers.has("Content-Type") && opts.body) headers.set("Content-Type", "application/json");
+  // Reuse the session the main page saved when you signed in
+  const token = localStorage.getItem("cardsense_access_token");
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
   const res = await fetch(backendUrl(path), { ...opts, headers });
   let data = null;
   try { data = await res.json(); } catch (_) {}
+  if (res.status === 401) {
+    throw new Error("Not signed in. Sign in on the main page first (or run the server with AUTH_ENABLED=0).");
+  }
   if (!res.ok) {
     const msg = (data && data.detail) ? data.detail : `${res.status} ${res.statusText}`;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
   }
   return data;
+}
+
+// True when the server requires a login and this browser has none. Checked up front so the page
+// shows one clear message instead of firing requests that can only fail with 401.
+async function signInRequired() {
+  if (localStorage.getItem("cardsense_access_token")) return false;
+  try {
+    const health = await (await fetch(backendUrl("/api/health"))).json();
+    return Boolean(health && health.auth_enabled);
+  } catch (_) { return false; }
+}
+
+// Does the server already have this game? (Asking the list avoids a 404 in the console on a first visit.)
+async function gameExists(gameId) {
+  const data = await apiFetch("/api/blackjack/games");
+  return Boolean(data && data.games && data.games[gameId]);
 }
 
 // ---------------- helpers -----------------------------------------------------
@@ -378,8 +401,14 @@ function BlackjackApp() {
     let mounted = true;
     (async () => {
       let needRoiSync = false;
+      if (await signInRequired()) {
+        if (mounted) setError("Not signed in. Sign in on the main page first (or run the server with AUTH_ENABLED=0).");
+        return;
+      }
       try {
-        const data = await apiFetch(`/api/blackjack/games/${encodeURIComponent(gameId)}/state`);
+        const exists = await gameExists(gameId);
+        if (!mounted) return;
+        const data = exists ? await apiFetch(`/api/blackjack/games/${encodeURIComponent(gameId)}/state`) : null;
         if (!mounted) return;
         if (data?.state) {
           setBjState(data.state);
@@ -418,7 +447,9 @@ function BlackjackApp() {
   // it so the user doesn't have to manually refresh the page.
   useEffect(() => {
     const interval = setInterval(async () => {
+      if (await signInRequired()) return;
       try {
+        if (!(await gameExists(gameId))) { await startGame(); return; }  // the game vanished (e.g. a server restart)
         const data = await apiFetch(`/api/blackjack/games/${encodeURIComponent(gameId)}/state`);
         // If state exists but ROIs are null, defensively re-POST them
         const cfg = data?.state?.config || {};
