@@ -1,0 +1,7 @@
+# Worker image dependencies. torch/torchvision are installed separately in
+# Dockerfile.worker so the CPU or CUDA build can be chosen at build time.
+redis==5.2.1
+requests==2.32.3
+numpy==2.1.1
+opencv-python-headless==4.11.0.86
+ultralytics==8.3.103

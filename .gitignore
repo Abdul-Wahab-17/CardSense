@@ -13,3 +13,8 @@ data/
 node_modules/
 package.json
 package-lock.json
+# training outputs
+training/results/_fetch/
+training/results/failed/
+training/results/last.pt
+models/best.pt

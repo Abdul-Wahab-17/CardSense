@@ -23,7 +23,8 @@ services:
       dockerfile: Dockerfile.backend
     container_name: cardsense-api
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       APP_ROLE: ${APP_ROLE:-all}
       REDIS_URL: redis://redis:6379/0
@@ -45,7 +46,8 @@ services:
       dockerfile: Dockerfile.backend
     container_name: cardsense-reducer
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       APP_ROLE: reducer
       REDIS_URL: redis://redis:6379/0
@@ -64,9 +66,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    gpus: all
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       REDIS_URL: redis://redis:6379/0
       FRAME_STREAM: frames
@@ -87,7 +89,7 @@ services:
       WORKER_HEARTBEAT_SEC: ${WORKER_HEARTBEAT_SEC:-5}
       MODEL_SMOKE_TEST_URLS: ${MODEL_SMOKE_TEST_URLS:-}
       MODEL_SMOKE_MIN_DETECTIONS: ${MODEL_SMOKE_MIN_DETECTIONS:-1}
-      YOLO_DEVICE: ${YOLO_DEVICE:-0}
+      YOLO_DEVICE: ${YOLO_DEVICE:-cpu}
       DATABASE_URL: ${DATABASE_URL:-}
     volumes:
       - ./models:/app/models

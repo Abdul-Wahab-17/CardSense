@@ -4,7 +4,7 @@ from backend.app.fusion import FusionEngine
 from backend.app.game_state import GameStateEngine
 from backend.app.main import _build_advisor_response, _card_tracking_sets, _mark_frame_seen, game_state_engine, pipeline_metrics
 from backend.app.models import BBox, CardLifecycleEntry, Detection, DetectionEvent, MatchState, PlayedHistoryItem
-from worker.worker import is_out_of_order_frame
+import pytest
 
 
 class _FakeRedis:
@@ -86,6 +86,10 @@ def test_duplicate_frame_id_dropped_exactly_once(monkeypatch):
 
 
 def test_out_of_order_frames_skipped_via_monotonic_guard():
+    pytest.importorskip('cv2')  # the worker needs OpenCV / ultralytics, which CI installs
+    pytest.importorskip('ultralytics')
+    from worker.worker import is_out_of_order_frame
+
     latest = {"cam-a": 2000}
     assert is_out_of_order_frame("cam-a", 1999, latest)
     assert is_out_of_order_frame("cam-a", 2000, latest)

@@ -1,25 +1,7 @@
-fastapi==0.115.12
-uvicorn[standard]==0.34.0
-redis==5.2.1
-pydantic==2.11.3
-pydantic-settings==2.8.1
-requests==2.32.3
-opencv-python-headless==4.11.0.86
-numpy==2.1.1
-PyJWT==2.8.0
-psycopg[binary]==3.2.1
-Pillow==11.3.0
-transformers==4.37.0
+# Everything needed to run the backend, the worker and the tests locally.
+# The Docker images use the narrower requirements-backend.txt / requirements-worker.txt.
+-r requirements-backend.txt
+-r requirements-worker.txt
 torch>=2.0.0
-ultralytics==8.3.103
-omegaconf==2.3.0
-
-# Development and testing
+torchvision
 pytest==7.4.0
-pytest-asyncio==0.22.0
-pytest-cov==4.1.0
-mypy==1.7.0
-black==24.8.0
-flake8==6.1.0
-isort==5.12.0
-coverage==7.2.7
