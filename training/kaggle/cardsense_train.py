@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 WORK = Path("/kaggle/working")
@@ -20,23 +19,23 @@ def run(*cmd, cwd=None):
     subprocess.run([str(c) for c in cmd], check=True, cwd=cwd)
 
 
-def find(pattern):
-    hits = sorted(glob.glob(f"/kaggle/input/**/{pattern}", recursive=True))
-    if not hits:
-        raise SystemExit(f"{pattern} not found under /kaggle/input: {os.listdir('/kaggle/input')}")
-    return Path(hits[0])
+def find(name):
+    """First file or directory called `name` under /kaggle/input (follows symlinks)."""
+    seen = []
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+        seen.extend(os.path.join(root, n) for n in dirs + files)
+        if name in dirs + files:
+            return Path(root) / name
+    raise SystemExit(f"{name} not found under /kaggle/input; contents: {seen[:60]}")
 
 
-bundle = find("repo.tar.gz").parent
+bundle = find("git_ref.txt").parent
 run(sys.executable, "-m", "pip", "install", "-q", "--no-index", "--no-deps", *sorted(glob.glob(str(bundle / "wheels" / "*.whl"))))
 font_dir = Path.home() / ".config" / "Ultralytics"  # ultralytics would try to download this font
 font_dir.mkdir(parents=True, exist_ok=True)
 shutil.copy(bundle / "Arial.ttf", font_dir / "Arial.ttf")
 
-repo = WORK / "CardSense"
-repo.mkdir(exist_ok=True)
-with tarfile.open(bundle / "repo.tar.gz") as t:
-    t.extractall(repo)
+repo = bundle / "repo"
 
 card_data = find("README.roboflow.txt").parent  # the public dataset's root (data.yaml + train/valid/test)
 run(sys.executable, repo / "training" / "prepare_dataset.py", "--dir", card_data, "--out", WORK / "cards")
@@ -51,5 +50,4 @@ for name in ("weights/best.pt", "results.csv", "results.png", "confusion_matrix_
     shutil.copy(run_dir / name, out / Path(name).name)
 shutil.copy(bundle / "git_ref.txt", out / "git_ref.txt")
 shutil.rmtree(WORK / "cards")  # keep the kernel output small
-shutil.rmtree(repo)
 print("done:", sorted(p.name for p in out.iterdir()))

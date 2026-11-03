@@ -18,10 +18,10 @@ USER_NAME="$(kaggle config view | awk '/username/ {print $3}')"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 BUNDLE="$WORKDIR/bundle"; KERNEL="$WORKDIR/kernel"
-mkdir -p "$BUNDLE/wheels" "$KERNEL"
+mkdir -p "$BUNDLE/wheels" "$BUNDLE/repo" "$KERNEL"
 
 echo "building the offline bundle for $REF"
-git -C "$REPO_ROOT" archive --format=tar.gz -o "$BUNDLE/repo.tar.gz" "$REF"
+git -C "$REPO_ROOT" archive --format=tar "$REF" | tar -x -C "$BUNDLE/repo"
 git -C "$REPO_ROOT" rev-parse "$REF" > "$BUNDLE/git_ref.txt"
 ULTRALYTICS="$(awk -F'==' '/^ultralytics==/ {print $2}' "$REPO_ROOT/requirements-worker.txt")"
 python -m pip download -q --no-deps -d "$BUNDLE/wheels" "ultralytics==$ULTRALYTICS" ultralytics-thop py-cpuinfo
@@ -29,9 +29,9 @@ curl -fsSL -o "$BUNDLE/yolov8n.pt" https://github.com/ultralytics/assets/release
 curl -fsSL -o "$BUNDLE/Arial.ttf" https://github.com/ultralytics/assets/releases/download/v0.0.0/Arial.ttf
 sed "s#KAGGLE_USERNAME#$USER_NAME#" dataset-metadata.json > "$BUNDLE/dataset-metadata.json"
 if kaggle datasets status "$USER_NAME/cardsense-offline" >/dev/null 2>&1; then
-  kaggle datasets version -p "$BUNDLE" -m "bundle for $REF" -r zip
+  kaggle datasets version -p "$BUNDLE" -m "bundle for $REF" -r tar
 else
-  kaggle datasets create -p "$BUNDLE" -r zip
+  kaggle datasets create -p "$BUNDLE" -r tar
 fi
 echo "waiting for the dataset to be ready"
 until kaggle datasets status "$USER_NAME/cardsense-offline" 2>&1 | grep -qi ready; do sleep 15; done
