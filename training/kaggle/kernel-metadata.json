@@ -6,8 +6,8 @@
   "kernel_type": "script",
   "is_private": true,
   "enable_gpu": true,
-  "enable_internet": true,
-  "dataset_sources": ["andy8744/playing-cards-object-detection-dataset"],
+  "enable_internet": false,
+  "dataset_sources": ["andy8744/playing-cards-object-detection-dataset", "KAGGLE_USERNAME/cardsense-offline"],
   "competition_sources": [],
   "kernel_sources": []
 }
