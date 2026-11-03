@@ -23,6 +23,7 @@ from pathlib import Path
 
 import torch
 from ultralytics import YOLO
+from ultralytics.models.yolo.detect import DetectionTrainer
 
 
 def add_glare(images: torch.Tensor, p: float = 0.4) -> torch.Tensor:
@@ -45,9 +46,17 @@ def add_glare(images: torch.Tensor, p: float = 0.4) -> torch.Tensor:
     return images
 
 
-def glare_callback(trainer):
-    if trainer.model.training:
-        trainer.batch["img"] = add_glare(trainer.batch["img"])
+class GlareTrainer(DetectionTrainer):
+    """DetectionTrainer that adds the glare augmentation to every training batch.
+
+    Ultralytics has no per-batch callback that can modify images (an unknown event name is accepted silently
+    and never fires), so the hook is the trainer's own preprocess_batch, which runs only in the training loop.
+    """
+
+    def preprocess_batch(self, batch):
+        batch = super().preprocess_batch(batch)  # moves to device, scales to [0, 1]
+        batch["img"] = add_glare(batch["img"])
+        return batch
 
 
 def main():
@@ -67,9 +76,8 @@ def main():
 
     random.seed(args.seed)
     model = YOLO(args.weights)
-    model.add_callback("on_preprocess_batch", glare_callback)
     model.train(
-        data=args.data, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, seed=args.seed,
+        trainer=GlareTrainer, data=args.data, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, seed=args.seed,
         optimizer="AdamW", lr0=0.01, weight_decay=5e-4, cos_lr=True, warmup_epochs=3, patience=10,
         close_mosaic=10,                 # mosaic on for the first 40 of 50 epochs
         degrees=25, hsv_h=0.0, hsv_s=0.5, hsv_v=0.4, fliplr=0.5, scale=0.5, translate=0.1,
