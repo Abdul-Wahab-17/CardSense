@@ -1,0 +1,13 @@
+{
+  "id": "KAGGLE_USERNAME/cardsense-yolov8n",
+  "title": "cardsense-yolov8n",
+  "code_file": "cardsense_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["andy8744/playing-cards-object-detection-dataset"],
+  "competition_sources": [],
+  "kernel_sources": []
+}

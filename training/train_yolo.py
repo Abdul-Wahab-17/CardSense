@@ -11,9 +11,12 @@ Card-aware augmentations from the report:
     applies one rotation range to every image, so this script uses +-25 degrees for all ranks: safe for 6/9,
     but less rotation variety than the report for other ranks. See the README for how this affects results.
 
-    python training/train_yolo.py --data path/to/data.yaml
+    python training/train_yolo.py --data data/cards/data.yaml      # after training/prepare_dataset.py
+
+Writes runs/<name>/weights/best.pt plus runs/<name>/test_metrics.json (held-out test split, evaluated once).
 """
 import argparse
+import json
 import math
 import random
 from pathlib import Path
@@ -57,6 +60,9 @@ def main():
     ap.add_argument("--project", default="runs")
     ap.add_argument("--name", default="cardsense")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default=None, help="'0' for the first GPU, 'cpu'; default: GPU if present")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--fraction", type=float, default=1.0, help="train on this fraction of the images (smoke tests)")
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -67,11 +73,24 @@ def main():
         optimizer="AdamW", lr0=0.01, weight_decay=5e-4, cos_lr=True, warmup_epochs=3, patience=10,
         close_mosaic=10,                 # mosaic on for the first 40 of 50 epochs
         degrees=25, hsv_h=0.0, hsv_s=0.5, hsv_v=0.4, fliplr=0.5, scale=0.5, translate=0.1,
-        project=args.project, name=args.name, exist_ok=True,
+        project=args.project, name=args.name, exist_ok=True, deterministic=True,
+        device=args.device, workers=args.workers, fraction=args.fraction,
     )
-    metrics = model.val(split="test")  # the held-out test split, evaluated once at the end
-    print(f"test mAP@0.5 = {metrics.box.map50:.4f}   mAP@0.5:0.95 = {metrics.box.map:.4f}")
-    best = Path(args.project) / args.name / "weights" / "best.pt"
+    run_dir = Path(model.trainer.save_dir)
+    best = run_dir / "weights" / "best.pt"
+    # Evaluate the best checkpoint on the held-out test split, once, after training has finished.
+    best_model = YOLO(str(best))
+    metrics = best_model.val(data=args.data, split="test", imgsz=args.imgsz, device=args.device, plots=True,
+                             project=args.project, name=args.name + "_test", exist_ok=True)
+    result = {
+        "map50": float(metrics.box.map50), "map50_95": float(metrics.box.map),
+        "precision": float(metrics.box.mp), "recall": float(metrics.box.mr),
+        "per_class_map50": {best_model.names[int(c)]: float(v) for c, v in zip(metrics.box.ap_class_index, metrics.box.ap50)},
+        "epochs_requested": args.epochs, "imgsz": args.imgsz, "seed": args.seed,
+        "ultralytics": __import__("ultralytics").__version__, "torch": torch.__version__,
+    }
+    (run_dir / "test_metrics.json").write_text(json.dumps(result, indent=2))
+    print(f"test mAP@0.5 = {result['map50']:.4f}   mAP@0.5:0.95 = {result['map50_95']:.4f}")
     print(f"best weights: {best}")
 
 
