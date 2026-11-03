@@ -59,31 +59,7 @@ class GlareTrainer(DetectionTrainer):
         return batch
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True, help="data.yaml of the YOLO-format dataset")
-    ap.add_argument("--weights", default="yolov8n.pt")
-    ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--imgsz", type=int, default=640)
-    ap.add_argument("--project", default="runs")
-    ap.add_argument("--name", default="cardsense")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--device", default=None, help="'0' for the first GPU, 'cpu'; default: GPU if present")
-    ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--fraction", type=float, default=1.0, help="train on this fraction of the images (smoke tests)")
-    args = ap.parse_args()
-
-    random.seed(args.seed)
-    model = YOLO(args.weights)
-    model.train(
-        trainer=GlareTrainer, data=args.data, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, seed=args.seed,
-        optimizer="AdamW", lr0=0.01, weight_decay=5e-4, cos_lr=True, warmup_epochs=3, patience=10,
-        close_mosaic=10,                 # mosaic on for the first 40 of 50 epochs
-        degrees=25, hsv_h=0.0, hsv_s=0.5, hsv_v=0.4, fliplr=0.5, scale=0.5, translate=0.1,
-        project=args.project, name=args.name, exist_ok=True, deterministic=True,
-        device=args.device, workers=args.workers, fraction=args.fraction,
-    )
+def finish(model, args):
     run_dir = Path(model.trainer.save_dir)
     best = run_dir / "weights" / "best.pt"
     # Evaluate the best checkpoint on the held-out test split, once, after training has finished.
@@ -100,6 +76,39 @@ def main():
     (run_dir / "test_metrics.json").write_text(json.dumps(result, indent=2))
     print(f"test mAP@0.5 = {result['map50']:.4f}   mAP@0.5:0.95 = {result['map50_95']:.4f}")
     print(f"best weights: {best}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True, help="data.yaml of the YOLO-format dataset")
+    ap.add_argument("--weights", default="yolov8n.pt")
+    ap.add_argument("--epochs", type=int, default=50)
+    ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--project", default="runs")
+    ap.add_argument("--name", default="cardsense")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default=None, help="'0' for the first GPU, 'cpu'; default: GPU if present")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--resume-from", default=None, help="path to a last.pt: continue an interrupted run")
+    ap.add_argument("--fraction", type=float, default=1.0, help="train on this fraction of the images (smoke tests)")
+    args = ap.parse_args()
+
+    random.seed(args.seed)
+    if args.resume_from:  # hyper-parameters, dataset and epoch counter all come from the checkpoint
+        model = YOLO(args.resume_from)
+        model.train(trainer=GlareTrainer, resume=True)
+        return finish(model, args)
+    model = YOLO(args.weights)
+    model.train(
+        trainer=GlareTrainer, data=args.data, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, seed=args.seed,
+        optimizer="AdamW", lr0=0.01, weight_decay=5e-4, cos_lr=True, warmup_epochs=3, patience=10,
+        close_mosaic=10,                 # mosaic on for the first 40 of 50 epochs
+        degrees=25, hsv_h=0.0, hsv_s=0.5, hsv_v=0.4, fliplr=0.5, scale=0.5, translate=0.1,
+        project=args.project, name=args.name, exist_ok=True, deterministic=True,
+        device=args.device, workers=args.workers, fraction=args.fraction,
+    )
+    return finish(model, args)
 
 
 if __name__ == "__main__":
